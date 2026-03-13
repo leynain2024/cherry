@@ -22,6 +22,11 @@ export default defineConfig({
         changeOrigin: true,
         secure: false,
       },
+      '/audio-assets': {
+        target: 'https://127.0.0.1:3135',
+        changeOrigin: true,
+        secure: false,
+      },
     },
   },
   preview: {

@@ -10,6 +10,7 @@ import {
   deleteSpeakingRecording,
   deleteUser,
   evaluateSpeaking,
+  getGenerationJob,
   getSpeakingRecordings,
   generateUnitDraft,
   getAdminSession,
@@ -22,6 +23,7 @@ import {
   logoutUser,
   publishDraft as publishDraftApi,
   resetUserPassword,
+  retryGenerationDraft,
   saveUserProgress,
   saveProjectSettings,
   saveProviderSetting,
@@ -49,6 +51,8 @@ import type {
   AdminState,
   AppData,
   ChallengeActivity,
+  ChoiceOption,
+  GenerationJob,
   ProjectSettings,
   ProviderId,
   ProviderPricing,
@@ -57,6 +61,7 @@ import type {
   SpeakingPassScore,
   StudentProgress,
   Subject,
+  SubjectImage,
   Unit,
   User,
   UserSubjectAssignmentResult,
@@ -71,6 +76,7 @@ type SubmissionState =
   | { status: 'done'; score: number; stars: number; title: string; mistakes: string[]; completed: boolean }
 
 type SecretFieldId = 'openai-api-key' | 'qwen-api-key' | 'aliyun-access-key-id' | 'aliyun-access-key-secret'
+type QueueDropPosition = 'before' | 'after'
 
 declare global {
   interface Window {
@@ -186,6 +192,34 @@ const openAiSpeechModelOptions = [
   { value: 'gpt-4o-transcribe', label: 'gpt-4o-transcribe', note: '转写能力更强，但成本更高。' },
 ] as const
 
+const openAiTtsModelOptions = [
+  { value: 'gpt-4o-mini-tts', label: 'gpt-4o-mini-tts', note: '适合预生成标准教学播报音频。' },
+] as const
+
+const openAiTtsVoiceOptions = [
+  'alloy',
+  'ash',
+  'ballad',
+  'coral',
+  'echo',
+  'fable',
+  'onyx',
+  'nova',
+  'sage',
+  'shimmer',
+  'verse',
+  'marin',
+  'cedar',
+].map((value) => ({
+  value,
+  label: value,
+}))
+
+const openAiTtsFormatOptions = [
+  { value: 'mp3', label: 'mp3', note: '文件更小，适合网页播放。' },
+  { value: 'wav', label: 'wav', note: '音质更高，但文件更大。' },
+] as const
+
 const openAiMaxOutputTokenOptions = [512, 1024, 2048, 4096, 8192, 16384] as const
 
 const qwenApiModeOptions = [
@@ -214,6 +248,76 @@ const qwenSpeechModelOptions = [
   { value: 'qwen-audio-turbo', label: 'qwen-audio-turbo', note: '支持更丰富音频理解。' },
 ] as const
 
+const qwenTtsModelOptions = [
+  { value: 'qwen3-tts-flash', label: 'qwen3-tts-flash', note: '适合预生成英语句子播报。' },
+] as const
+
+const qwenTtsVoiceOptions = [
+  'Cherry',
+  'Serena',
+  'Ethan',
+  'Chelsie',
+  'Momo',
+  'Vivian',
+  'Moon',
+  'Maia',
+  'Kai',
+  'Nofish',
+  'Bella',
+  'Jennifer',
+  'Ryan',
+  'Katerina',
+  'Aiden',
+  'Eldric Sage',
+  'Mia',
+  'Mochi',
+  'Bellona',
+  'Vincent',
+  'Bunny',
+  'Neil',
+  'Elias',
+  'Arthur',
+  'Nini',
+  'Ebona',
+  'Seren',
+  'Pip',
+  'Stella',
+  'Bodega',
+  'Sonrisa',
+  'Alek',
+  'Dolce',
+  'Sohee',
+  'Ono Anna',
+  'Lenn',
+  'Emilien',
+  'Andre',
+  'Radio Gol',
+  'Jada',
+  'Dylan',
+  'Li',
+  'Marcus',
+  'Roy',
+  'Peter',
+  'Sunny',
+  'Eric',
+  'Rocky',
+  'Kiki',
+].map((value) => ({
+  value,
+  label: value,
+}))
+
+const qwenTtsFormatOptions = [
+  { value: 'wav', label: 'wav', note: '阿里侧默认更稳。' },
+  { value: 'mp3', label: 'mp3', note: '文件更小。' },
+] as const
+
+const naturalFileNameCollator = new Intl.Collator('zh-Hans-CN', {
+  numeric: true,
+  sensitivity: 'base',
+})
+const defaultOpenAiProxyUrl = '127.0.0.1:7892'
+
 const aliyunRegionOptions = [{ value: 'cn-hangzhou', label: 'cn-hangzhou', note: '当前项目适配的 OCR 地域。' }] as const
 const aliyunOcrTypeOptions = [{ value: 'Advanced', label: 'Advanced', note: '当前项目只保留教材页 OCR 所需能力。' }] as const
 const speakingPassScoreOptions: SpeakingPassScore[] = [60, 65, 70, 75]
@@ -222,6 +326,7 @@ const USERS_PAGE_SIZE = 8
 const normalizePricing = (pricing?: ProviderPricing): ProviderPricing => ({
   text: pricing?.text || {},
   speech: pricing?.speech || {},
+  tts: pricing?.tts || {},
   ocr: pricing?.ocr || {},
 })
 
@@ -231,11 +336,18 @@ const normalizeOpenAIProviderForm = (form: ProviderSetting): ProviderSetting => 
   model: openAiModelOptions.some((option) => option.value === form.model) ? form.model : 'gpt-5.2',
   baseUrl: 'https://api.openai.com/v1',
   endpoint: '',
-  proxyUrl: typeof form.proxyUrl === 'string' && form.proxyUrl.trim() ? form.proxyUrl.trim() : '127.0.0.1:7892',
+  proxyUrl: typeof form.proxyUrl === 'string' ? form.proxyUrl.trim() : defaultOpenAiProxyUrl,
   reasoningEffort: openAiReasoningOptions.some((option) => option.value === form.reasoningEffort) ? form.reasoningEffort : 'high',
   verbosity: openAiVerbosityOptions.some((option) => option.value === form.verbosity) ? form.verbosity : 'medium',
   maxOutputTokens: openAiMaxOutputTokenOptions.some((value) => value === form.maxOutputTokens) ? form.maxOutputTokens : 2048,
   speechModel: openAiSpeechModelOptions.some((option) => option.value === form.speechModel) ? form.speechModel : 'gpt-4o-mini-transcribe',
+  ttsModel: openAiTtsModelOptions.some((option) => option.value === form.ttsModel) ? form.ttsModel : 'gpt-4o-mini-tts',
+  ttsVoice: openAiTtsVoiceOptions.some((option) => option.value === form.ttsVoice) ? form.ttsVoice : 'alloy',
+  ttsFormat: openAiTtsFormatOptions.some((option) => option.value === form.ttsFormat) ? form.ttsFormat : 'mp3',
+  ttsInstructions:
+    typeof form.ttsInstructions === 'string' && form.ttsInstructions.trim()
+      ? form.ttsInstructions.trim()
+      : 'Read in a warm, patient classroom voice for primary-school English learners.',
   ocrModel: openAiModelOptions.some((option) => option.value === form.ocrModel) ? form.ocrModel : form.model || 'gpt-5.2',
   pricing: normalizePricing(form.pricing),
 })
@@ -248,8 +360,50 @@ const normalizeQwenProviderForm = (form: ProviderSetting): ProviderSetting => ({
   temperature: qwenTemperatureOptions.some((option) => option.value === form.temperature) ? form.temperature : 0.2,
   maxOutputTokens: qwenMaxTokenOptions.some((value) => value === form.maxOutputTokens) ? form.maxOutputTokens : 2048,
   speechModel: qwenSpeechModelOptions.some((option) => option.value === form.speechModel) ? form.speechModel : 'qwen3-asr-flash',
+  ttsModel: qwenTtsModelOptions.some((option) => option.value === form.ttsModel) ? form.ttsModel : 'qwen3-tts-flash',
+  ttsVoice: qwenTtsVoiceOptions.some((option) => option.value === form.ttsVoice) ? form.ttsVoice : 'Cherry',
+  ttsLanguageType: typeof form.ttsLanguageType === 'string' && form.ttsLanguageType.trim() ? form.ttsLanguageType.trim() : 'English',
+  ttsFormat: qwenTtsFormatOptions.some((option) => option.value === form.ttsFormat) ? form.ttsFormat : 'wav',
+  ttsInstructions: typeof form.ttsInstructions === 'string' ? form.ttsInstructions : '',
   pricing: normalizePricing(form.pricing),
 })
+
+const getGenerationProgressPercent = (job: GenerationJob | null) => {
+  if (!job) {
+    return 0
+  }
+  if (job.status === 'failed') {
+    return 100
+  }
+  if (job.stage === 'completed' || job.status === 'success') {
+    return 100
+  }
+  if (job.stage === 'draft') {
+    return 88
+  }
+  if (job.stage === 'ocr') {
+    const total = Math.max(job.totalImages, 1)
+    return Math.min(80, Math.round((job.processedImages / total) * 80))
+  }
+
+  return 8
+}
+
+const getGenerationProgressHint = (job: GenerationJob | null) => {
+  if (!job) {
+    return ''
+  }
+  if (job.message) {
+    return job.message
+  }
+  if (job.stage === 'draft') {
+    return '正在生成单元草稿。'
+  }
+  if (job.stage === 'ocr') {
+    return `正在识别教材图片（${job.processedImages}/${job.totalImages}）。`
+  }
+  return '正在准备生成任务。'
+}
 
 const normalizeAliyunOcrProviderForm = (form: ProviderSetting): ProviderSetting => ({
   ...form,
@@ -266,6 +420,34 @@ const speakLine = (line: string) => {
   }
   window.speechSynthesis.cancel()
   window.speechSynthesis.speak(new SpeechSynthesisUtterance(line))
+}
+
+const moveQueueItem = (queue: string[], targetId: string, direction: -1 | 1) => {
+  const currentIndex = queue.indexOf(targetId)
+  const nextIndex = currentIndex + direction
+  if (currentIndex < 0 || nextIndex < 0 || nextIndex >= queue.length) {
+    return queue
+  }
+
+  const nextQueue = [...queue]
+  const [item] = nextQueue.splice(currentIndex, 1)
+  nextQueue.splice(nextIndex, 0, item)
+  return nextQueue
+}
+
+const reorderQueueItem = (queue: string[], draggedId: string, targetId: string, position: QueueDropPosition) => {
+  if (!draggedId || draggedId === targetId) {
+    return queue
+  }
+
+  const nextQueue = queue.filter((item) => item !== draggedId)
+  const targetIndex = nextQueue.indexOf(targetId)
+  if (targetIndex < 0) {
+    return queue
+  }
+
+  nextQueue.splice(position === 'before' ? targetIndex : targetIndex + 1, 0, draggedId)
+  return nextQueue
 }
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => window.setTimeout(resolve, ms))
@@ -463,6 +645,10 @@ function App() {
   const [resetUserPasswordVisible, setResetUserPasswordVisible] = useState(false)
   const [busyMap, setBusyMap] = useState<Record<string, boolean>>({})
   const [providerForms, setProviderForms] = useState<Record<string, ProviderSetting>>({})
+  const [draftGenerationJob, setDraftGenerationJob] = useState<GenerationJob | null>(null)
+  const [draggedQueueImageId, setDraggedQueueImageId] = useState('')
+  const [previewImageId, setPreviewImageId] = useState('')
+  const [lessonAudioFeedback, setLessonAudioFeedback] = useState<{ activityId: string; tone: 'info' | 'warning'; text: string } | null>(null)
   const [secretVisibility, setSecretVisibility] = useState<Record<SecretFieldId, boolean>>({
     'openai-api-key': false,
     'qwen-api-key': false,
@@ -489,6 +675,7 @@ function App() {
   const errorAudioRef = useRef<HTMLAudioElement | null>(null)
   const rewardHideTimerRef = useRef<number | null>(null)
   const rewardStartTimerRef = useRef<number | null>(null)
+  const lessonAudioRef = useRef<HTMLAudioElement | null>(null)
 
   const publishedUnits = units.filter((unit) => unit.status === 'published')
   const activeUnit = publishedUnits.find((unit) => unit.id === activeUnitId) ?? publishedUnits[0]
@@ -496,8 +683,20 @@ function App() {
   const currentSubject = subjects.find((subject) => subject.id === selectedSubjectId) || subjects[0]
   const currentAdminSubject =
     adminState.subjects.find((subject) => subject.id === selectedSubjectId) || adminState.subjects[0]
+  const currentAdminSubjectName = currentAdminSubject?.name || ''
+  const sortedAdminImages = [...(currentAdminSubject?.images || [])].sort((left, right) =>
+    naturalFileNameCollator.compare(left.fileName, right.fileName),
+  )
+  const previewImageIndex = previewImageId ? sortedAdminImages.findIndex((image) => image.id === previewImageId) : -1
+  const previewImage = previewImageIndex >= 0 ? sortedAdminImages[previewImageIndex] : null
+  const selectedImageQueue = selectedImageIds
+    .map((imageId) => sortedAdminImages.find((image) => image.id === imageId))
+    .filter((image): image is SubjectImage => Boolean(image))
+  const allAdminImagesSelected = Boolean(sortedAdminImages.length) && selectedImageIds.length === sortedAdminImages.length
   const selectedDraft =
     adminState.drafts.find((draft) => draft.id === selectedDraftId) || adminState.drafts[0] || null
+  const draftGenerationSubjectName =
+    adminState.subjects.find((subject) => subject.id === draftGenerationJob?.subjectId)?.name || currentAdminSubjectName
   const filteredUsers = adminState.users.filter((user) => user.username.toLowerCase().includes(userSearch.trim().toLowerCase()))
   const userPageCount = Math.max(1, Math.ceil(filteredUsers.length / USERS_PAGE_SIZE))
   const paginatedUsers = filteredUsers.slice((userListPage - 1) * USERS_PAGE_SIZE, userListPage * USERS_PAGE_SIZE)
@@ -647,8 +846,32 @@ function App() {
       if (rewardStartTimerRef.current) {
         window.clearTimeout(rewardStartTimerRef.current)
       }
+      if (lessonAudioRef.current) {
+        lessonAudioRef.current.pause()
+        lessonAudioRef.current = null
+      }
     }
   }, [])
+
+  useEffect(() => {
+    const currentImageIdSet = new Set((currentAdminSubject?.images || []).map((image) => image.id))
+    setSelectedImageIds((current) => current.filter((imageId) => currentImageIdSet.has(imageId)))
+  }, [currentAdminSubject])
+
+  useEffect(() => {
+    if (!previewImageId) {
+      return
+    }
+
+    const nextImageExists = (currentAdminSubject?.images || []).some((image) => image.id === previewImageId)
+    if (!nextImageExists) {
+      setPreviewImageId('')
+    }
+  }, [currentAdminSubject, previewImageId])
+
+  useEffect(() => {
+    setLessonAudioFeedback(null)
+  }, [activeActivity?.id])
 
   useEffect(() => {
     let lastTouchEndAt = 0
@@ -793,6 +1016,76 @@ function App() {
 
   const setBusy = (key: string, value: boolean) => {
     setBusyMap((current) => ({ ...current, [key]: value }))
+  }
+
+  const openImagePreview = (imageId: string) => {
+    if (!sortedAdminImages.some((image) => image.id === imageId)) {
+      return
+    }
+    setPreviewImageId(imageId)
+  }
+
+  const movePreviewImage = (direction: -1 | 1) => {
+    if (previewImageIndex < 0) {
+      return
+    }
+
+    const nextIndex = previewImageIndex + direction
+    if (nextIndex < 0 || nextIndex >= sortedAdminImages.length) {
+      return
+    }
+
+    setPreviewImageId(sortedAdminImages[nextIndex].id)
+  }
+
+  const playLessonAudio = async (activityId: string, audioUrl?: string, fallbackText?: string) => {
+    if (audioUrl && typeof Audio !== 'undefined') {
+      try {
+        if (!lessonAudioRef.current) {
+          lessonAudioRef.current = new Audio()
+        }
+        lessonAudioRef.current.pause()
+        lessonAudioRef.current.src = audioUrl
+        lessonAudioRef.current.currentTime = 0
+        await lessonAudioRef.current.play()
+        setLessonAudioFeedback({
+          activityId,
+          tone: 'info',
+          text: '当前播放的是预生成标准音频。',
+        })
+        return
+      } catch {
+        setLessonAudioFeedback({
+          activityId,
+          tone: 'warning',
+          text: '标准音频加载失败，已回退到浏览器朗读。',
+        })
+      }
+    }
+
+    if (fallbackText) {
+      if (!audioUrl) {
+        setLessonAudioFeedback({
+          activityId,
+          tone: 'warning',
+          text: '这条内容当前没有预生成音频，正在使用浏览器朗读。',
+        })
+      }
+      speakLine(fallbackText)
+    }
+  }
+
+  const moveSelectedImage = (imageId: string, direction: -1 | 1) => {
+    setSelectedImageIds((current) => moveQueueItem(current, imageId, direction))
+  }
+
+  const handleQueueDrop = (targetId: string, position: QueueDropPosition) => {
+    if (!draggedQueueImageId) {
+      return
+    }
+
+    setSelectedImageIds((current) => reorderQueueItem(current, draggedQueueImageId, targetId, position))
+    setDraggedQueueImageId('')
   }
 
   const toggleSecretVisibility = (fieldId: SecretFieldId) => {
@@ -1421,6 +1714,42 @@ function App() {
     }
   }
 
+  const waitForGenerationJob = async (jobId: string) => {
+    const deadline = Date.now() + 20 * 60 * 1000
+    let pollingFailures = 0
+
+    while (true) {
+      let latestJob: GenerationJob
+      try {
+        latestJob = await getGenerationJob(jobId)
+        pollingFailures = 0
+      } catch (error) {
+        pollingFailures += 1
+        if (pollingFailures >= 3) {
+          throw error
+        }
+        await wait(1200)
+        continue
+      }
+
+      setDraftGenerationJob(latestJob)
+
+      if (latestJob.status === 'success') {
+        return latestJob
+      }
+
+      if (latestJob.status === 'failed') {
+        throw new Error(latestJob.errorMessage || latestJob.message || '单元草稿生成失败')
+      }
+
+      if (Date.now() > deadline) {
+        throw new Error('等待草稿生成结果超时，请稍后到草稿列表查看是否已完成。')
+      }
+
+      await wait(1200)
+    }
+  }
+
   const handleBootstrap = () =>
     wrapAction('bootstrap', async () => {
       await bootstrapAdmin(bootstrapForm.username, bootstrapForm.password)
@@ -1578,12 +1907,37 @@ function App() {
       if (!selectedSubjectId || !selectedImageIds.length) {
         throw new Error('请先勾选要生成的教材图片')
       }
-      await generateUnitDraft(selectedSubjectId, selectedImageIds)
+      const targetSubjectName = currentAdminSubjectName
+      setDraftGenerationJob(null)
+      const startedJob = await generateUnitDraft(selectedSubjectId, selectedImageIds)
+      setDraftGenerationJob(startedJob)
+      const finishedJob = await waitForGenerationJob(startedJob.id)
       await refreshAdminState()
       await refreshPublicData()
+      if (finishedJob.draftUnitId) {
+        setSelectedDraftId(finishedJob.draftUnitId)
+      }
       setSelectedImageIds([])
       setAdminTab('drafts')
-      setInfoMessage('单元草稿已生成，请校对后发布。')
+      setInfoMessage(`《${targetSubjectName || '当前学科'}》的单元草稿已生成，请校对后发布。`)
+    })
+
+  const handleRetryDraftGeneration = () =>
+    wrapAction('retry-draft-generation', async () => {
+      if (!draftGenerationJob?.id || !draftGenerationJob.hasOcrText) {
+        throw new Error('当前失败任务还没有可复用的 OCR 结果。')
+      }
+
+      const startedJob = await retryGenerationDraft(draftGenerationJob.id)
+      setDraftGenerationJob(startedJob)
+      const finishedJob = await waitForGenerationJob(startedJob.id)
+      await refreshAdminState()
+      await refreshPublicData()
+      if (finishedJob.draftUnitId) {
+        setSelectedDraftId(finishedJob.draftUnitId)
+      }
+      setAdminTab('drafts')
+      setInfoMessage('已基于上次 OCR 结果重试草稿整理。')
     })
 
   const handleSaveProjectSettings = (nextSettings: ProjectSettings) =>
@@ -1648,7 +2002,12 @@ function App() {
     }))
   }
 
-  const updatePricingOverride = (provider: ProviderId, capability: keyof ProviderPricing, field: 'inputPerMillion' | 'outputPerMillion' | 'requestCost' | 'perMinute', value: string) => {
+  const updatePricingOverride = (
+    provider: ProviderId,
+    capability: keyof ProviderPricing,
+    field: 'inputPerMillion' | 'inputPerTenThousandChars' | 'outputPerMillion' | 'requestCost' | 'perMinute',
+    value: string,
+  ) => {
     const form = providerForms[provider]
     const nextValue = value === '' ? undefined : Number(value)
     updateProviderForm(provider, {
@@ -1674,6 +2033,69 @@ function App() {
         units: subject.units.map((unit) => (unit.id === selectedDraft.id ? { ...unit, ...patch } : unit)),
       })),
     }))
+  }
+
+  const updateDraftReading = (patch: Partial<Unit['reading']>) => {
+    if (!selectedDraft) {
+      return
+    }
+
+    updateDraftField({
+      reading: {
+        ...selectedDraft.reading,
+        ...patch,
+      },
+    })
+  }
+
+  const updateDraftActivity = (activityId: string, patch: Partial<Activity>) => {
+    if (!selectedDraft) {
+      return
+    }
+
+    updateDraftField({
+      activities: selectedDraft.activities.map((activity) => (activity.id === activityId ? { ...activity, ...patch } : activity)) as Activity[],
+    })
+  }
+
+  const serializeChoiceOptions = (options: ChoiceOption[] = []) =>
+    options.map((option) => `${option.id} | ${option.label}${option.emoji ? ` | ${option.emoji}` : ''}`).join('\n')
+
+  const parseChoiceOptions = (value: string): ChoiceOption[] =>
+    value.split('\n').reduce<ChoiceOption[]>((options, line, index) => {
+      const [id, label, emoji] = line.split('|').map((item) => item.trim())
+      if (!label && !id) {
+        return options
+      }
+
+      options.push({
+        id: id || String.fromCharCode(97 + index),
+        label: label || id || `选项 ${index + 1}`,
+        emoji: emoji || undefined,
+      })
+      return options
+    }, [])
+
+  const getActivityAudioHint = (activity: Activity) => {
+    if (activity.kind !== 'listen-choice' && activity.kind !== 'speak-repeat' && activity.kind !== 'write-spell') {
+      return null
+    }
+
+    if (lessonAudioFeedback?.activityId === activity.id) {
+      return lessonAudioFeedback
+    }
+
+    if (activity.audioUrl) {
+      return {
+        tone: 'info' as const,
+        text: '已绑定预生成标准音频。',
+      }
+    }
+
+    return {
+      tone: 'warning' as const,
+      text: '当前没有预生成音频，按钮会退回浏览器朗读。',
+    }
   }
 
   const renderSecretField = ({
@@ -1741,14 +2163,16 @@ function App() {
 
     if (activity.kind === 'listen-choice') {
       const displayedChoiceAnswer = activeActivityLocked ? activity.correctOptionId : choiceAnswer
+      const audioHint = getActivityAudioHint(activity)
       return (
         <div className="activity-block">
           <div className="audio-row">
-            <button className="secondary-btn" onClick={() => speakLine(activity.audioText)}>
-              播放示范
+            <button className="secondary-btn" onClick={() => void playLessonAudio(activity.id, activity.audioUrl, activity.audioText)}>
+              {activity.audioUrl ? '播放标准音频' : '播放示范'}
             </button>
             <p>{activity.question}</p>
           </div>
+          {audioHint ? <p className={`status-inline ${audioHint.tone === 'warning' ? 'error' : 'success'}`}>{audioHint.text}</p> : null}
           <div className="choice-grid">
             {activity.options.map((option) => (
               <button
@@ -1772,6 +2196,7 @@ function App() {
 
     if (activity.kind === 'speak-repeat') {
       const bestSpeakingEntry = getBestSpeakingHistoryEntry(speakingHistory)
+      const audioHint = getActivityAudioHint(activity)
       const recordButtonLabel =
         speakingRecorderState === 'recording'
           ? '停止录音'
@@ -1790,8 +2215,8 @@ function App() {
               <p className="status-inline success">本关已拿到 3 星，保留历史录音供回放查看。</p>
             ) : (
               <div className="speaking-inline-actions">
-                <button className="secondary-btn" type="button" onClick={() => speakLine(activity.transcript)}>
-                  听示范
+                <button className="secondary-btn" type="button" onClick={() => void playLessonAudio(activity.id, activity.audioUrl, activity.transcript)}>
+                  {activity.audioUrl ? '听标准示范' : '听示范'}
                 </button>
                 <button
                   className="primary-btn"
@@ -1803,6 +2228,7 @@ function App() {
                 </button>
               </div>
             )}
+            {audioHint ? <p className={`status-inline ${audioHint.tone === 'warning' ? 'error' : 'success'}`}>{audioHint.text}</p> : null}
             {speakingRecorderError ? <p className="status-inline error">{speakingRecorderError}</p> : null}
           </div>
           <div className="speaking-history-card">
@@ -1921,10 +2347,17 @@ function App() {
     }
 
     if (activity.kind === 'write-spell') {
+      const audioHint = getActivityAudioHint(activity)
       return (
         <div className="activity-block">
           <article className="writing-card">
             <p className="sentence-line">{activity.sentence}</p>
+            <div className="audio-row">
+              <button className="secondary-btn" type="button" onClick={() => void playLessonAudio(activity.id, activity.audioUrl, activity.sentence)}>
+                {activity.audioUrl ? '播放听写音频' : '朗读句子'}
+              </button>
+            </div>
+            {audioHint ? <p className={`status-inline ${audioHint.tone === 'warning' ? 'error' : 'success'}`}>{audioHint.text}</p> : null}
             <input
               className="answer-input"
               value={activeActivityLocked ? activity.answer : textAnswer}
@@ -2526,7 +2959,7 @@ function App() {
                       <p>在学科中持续上传教材页图片，勾选一批后手动生成一个单元草稿。OCR 与草稿模型会自动跟随当前激活供应商。</p>
                     </div>
                     <div className="settings-note">
-                      <p>当前激活方案：<strong>{activeAiVendor === 'openai' ? 'OpenAI（文本 + 图像 OCR + 语音转写）' : '阿里系（Qwen + DashScope 语音 + 阿里云 OCR）'}</strong></p>
+                      <p>当前激活方案：<strong>{activeAiVendor === 'openai' ? 'OpenAI（文本 + 图像 OCR + 语音转写 + 语音合成）' : '阿里系（Qwen + DashScope 语音 + 阿里云 OCR）'}</strong></p>
                     </div>
                     <div className="editor-grid">
                       <label>
@@ -2544,9 +2977,58 @@ function App() {
                       <button className="primary-btn" disabled={busyMap['upload-images']} onClick={handleUploadImages}>{busyMap['upload-images'] ? '上传中...' : '上传到图片库'}</button>
                       <button className="primary-btn" disabled={busyMap['generate-draft']} onClick={handleGenerateDraft}>{busyMap['generate-draft'] ? '生成中...' : '生成单元草稿'}</button>
                     </div>
+                    {draftGenerationJob ? (
+                      <div className={`generation-progress-card ${draftGenerationJob.status}`}>
+                        <div className="generation-progress-head">
+                          <strong>
+                            {draftGenerationJob.status === 'failed'
+                              ? '生成失败'
+                              : draftGenerationJob.status === 'success'
+                                ? '生成完成'
+                                : '正在生成单元草稿'}
+                          </strong>
+                          <span>{getGenerationProgressPercent(draftGenerationJob)}%</span>
+                        </div>
+                        <small>当前学科：{draftGenerationSubjectName || '未选择学科'}</small>
+                        <div className="generation-progress-track" aria-hidden="true">
+                          <span style={{ width: `${getGenerationProgressPercent(draftGenerationJob)}%` }} />
+                        </div>
+                        <p>{getGenerationProgressHint(draftGenerationJob)}</p>
+                        {draftGenerationJob.stage === 'ocr' ? (
+                          <small>当前进度：已完成 {draftGenerationJob.processedImages} / {draftGenerationJob.totalImages} 张教材页识别。</small>
+                        ) : null}
+                        {draftGenerationJob.status === 'failed' && draftGenerationJob.errorMessage ? <small>{draftGenerationJob.errorMessage}</small> : null}
+                        {draftGenerationJob.status === 'failed' && draftGenerationJob.hasOcrText ? (
+                          <div className="action-row compact">
+                            <button
+                              className="primary-btn"
+                              disabled={busyMap['retry-draft-generation']}
+                              onClick={handleRetryDraftGeneration}
+                            >
+                              {busyMap['retry-draft-generation'] ? '重试中...' : '直接重试草稿'}
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    <div className="action-row compact">
+                      <button className="secondary-btn" type="button" onClick={() => setSelectedImageIds(sortedAdminImages.map((image) => image.id))} disabled={!sortedAdminImages.length || allAdminImagesSelected}>
+                        全选图片
+                      </button>
+                      <button className="secondary-btn" type="button" onClick={() => setSelectedImageIds([])} disabled={!selectedImageIds.length}>
+                        清空队列
+                      </button>
+                    </div>
+                    <div className="settings-note">
+                      <p>图片库默认按文件名排序。勾选后会进入右侧生成队列；生成时严格按队列顺序送去 OCR 和草稿整理。当前已选 {selectedImageIds.length} / {sortedAdminImages.length} 张。</p>
+                    </div>
                     <div className="image-grid">
-                      {currentAdminSubject?.images.map((image) => (
-                        <label key={image.id} className={`image-card ${selectedImageIds.includes(image.id) ? 'selected' : ''}`}>
+                      {sortedAdminImages.map((image) => (
+                        <label
+                          key={image.id}
+                          className={`image-card ${selectedImageIds.includes(image.id) ? 'selected' : ''}`}
+                          onDoubleClick={() => openImagePreview(image.id)}
+                        >
                           <input
                             type="checkbox"
                             checked={selectedImageIds.includes(image.id)}
@@ -2558,8 +3040,35 @@ function App() {
                           />
                           <img src={image.url} alt={image.fileName} />
                           <strong>{image.fileName}</strong>
+                          <small>双击查看大图</small>
+                          {selectedImageIds.includes(image.id) ? <small>队列第 {selectedImageIds.indexOf(image.id) + 1} 张</small> : null}
                         </label>
                       ))}
+                    </div>
+                    <div className="draft-list">
+                      {selectedImageQueue.length ? (
+                        selectedImageQueue.map((image, index) => (
+                          <article
+                            key={image.id}
+                            className="draft-item"
+                            draggable
+                            onDragStart={() => setDraggedQueueImageId(image.id)}
+                            onDragEnd={() => setDraggedQueueImageId('')}
+                            onDragOver={(event) => event.preventDefault()}
+                            onDrop={() => handleQueueDrop(image.id, 'before')}
+                          >
+                            <strong>{index + 1}. {image.fileName}</strong>
+                            <span>拖拽调整顺序，生成时按这里的先后识别。</span>
+                            <div className="action-row compact">
+                              <button className="secondary-btn" type="button" onClick={() => moveSelectedImage(image.id, -1)} disabled={index === 0}>上移</button>
+                              <button className="secondary-btn" type="button" onClick={() => moveSelectedImage(image.id, 1)} disabled={index === selectedImageQueue.length - 1}>下移</button>
+                              <button className="secondary-btn" type="button" onClick={() => setSelectedImageIds((current) => current.filter((item) => item !== image.id))}>移出队列</button>
+                            </div>
+                          </article>
+                        ))
+                      ) : (
+                        <p className="empty-copy">还没有加入生成队列。先从上方图片库勾选同一单元的教材页，再拖拽调整顺序。</p>
+                      )}
                     </div>
                   </>
                 ) : null}
@@ -2577,13 +3086,27 @@ function App() {
                             <button key={draft.id} className={`draft-item ${selectedDraftId === draft.id ? 'active' : ''}`} onClick={() => setSelectedDraftId(draft.id)}>
                               <strong>{draft.title}</strong>
                               <span>{draft.stage}</span>
-                              <small>{draft.contentOrigin === 'imported' ? '教材导入草稿' : '框架草稿'}</small>
+                              <small>
+                                {(draft.contentOrigin === 'imported' ? '教材导入草稿' : '框架草稿') +
+                                  ' · ' +
+                                  (adminState.subjects.find((subject) => subject.id === draft.subjectId)?.name || '未知学科')}
+                              </small>
                             </button>
                           ))}
                         </div>
                         <div className="editor-grid">
                           <label>单元标题<input value={selectedDraft.title} onChange={(event) => updateDraftField({ title: event.target.value })} /></label>
                           <label>阶段<input value={selectedDraft.stage} onChange={(event) => updateDraftField({ stage: event.target.value })} /></label>
+                          <label>封面 Emoji<input value={selectedDraft.coverEmoji} onChange={(event) => updateDraftField({ coverEmoji: event.target.value })} /></label>
+                          <label>主题色<input value={selectedDraft.themeColor} onChange={(event) => updateDraftField({ themeColor: event.target.value })} /></label>
+                          <label>
+                            难度
+                            <select value={selectedDraft.difficulty} onChange={(event) => updateDraftField({ difficulty: event.target.value as Unit['difficulty'] })}>
+                              <option value="Starter">Starter</option>
+                              <option value="Bridge">Bridge</option>
+                              <option value="Explorer">Explorer</option>
+                            </select>
+                          </label>
                           <label>学习目标<textarea value={selectedDraft.goal} onChange={(event) => updateDraftField({ goal: event.target.value })} /></label>
                           <label>词汇列表<textarea value={selectedDraft.vocabulary.map((item) => `${item.word} | ${item.meaning}`).join('\n')} onChange={(event) => updateDraftField({ vocabulary: event.target.value.split('\n').filter(Boolean).map((line, index) => {
                             const [word, meaning] = line.split('|').map((item) => item.trim())
@@ -2602,7 +3125,65 @@ function App() {
                             slots: ['demo'],
                             demoLine: line.replace('___', 'demo'),
                           })) })} /></label>
-                          <label>阅读内容<textarea value={selectedDraft.reading.content} onChange={(event) => updateDraftField({ reading: { ...selectedDraft.reading, content: event.target.value } })} /></label>
+                          <label>阅读标题<input value={selectedDraft.reading.title} onChange={(event) => updateDraftReading({ title: event.target.value })} /></label>
+                          <label>阅读音频文案<textarea value={selectedDraft.reading.audioText} onChange={(event) => updateDraftReading({ audioText: event.target.value })} /></label>
+                          <label>阅读问题<input value={selectedDraft.reading.question} onChange={(event) => updateDraftReading({ question: event.target.value })} /></label>
+                          <label>阅读内容<textarea value={selectedDraft.reading.content} onChange={(event) => updateDraftReading({ content: event.target.value })} /></label>
+                        </div>
+                        <div className="draft-list">
+                          {selectedDraft.activities.map((activity) => (
+                            <article key={activity.id} className="settings-card">
+                              <strong>{activity.title}</strong>
+                              <small>{activity.kind}</small>
+                              <div className="editor-grid compact">
+                                <label>标题<input value={activity.title} onChange={(event) => updateDraftActivity(activity.id, { title: event.target.value })} /></label>
+                                <label>提示语<textarea value={activity.prompt} onChange={(event) => updateDraftActivity(activity.id, { prompt: event.target.value })} /></label>
+                                {'durationMinutes' in activity ? (
+                                  <label>时长（分钟）<input type="number" min="1" value={activity.durationMinutes} onChange={(event) => updateDraftActivity(activity.id, { durationMinutes: Math.max(1, Number(event.target.value) || 1) })} /></label>
+                                ) : null}
+                                {activity.kind === 'listen-choice' ? (
+                                  <>
+                                    <label>音频文案<textarea value={activity.audioText} onChange={(event) => updateDraftActivity(activity.id, { audioText: event.target.value })} /></label>
+                                    <label>题目<input value={activity.question} onChange={(event) => updateDraftActivity(activity.id, { question: event.target.value })} /></label>
+                                    <label>选项（每行：id | 文案 | emoji）<textarea value={serializeChoiceOptions(activity.options)} onChange={(event) => updateDraftActivity(activity.id, { options: parseChoiceOptions(event.target.value) })} /></label>
+                                    <label>正确选项 ID<input value={activity.correctOptionId} onChange={(event) => updateDraftActivity(activity.id, { correctOptionId: event.target.value })} /></label>
+                                  </>
+                                ) : null}
+                                {activity.kind === 'speak-repeat' ? (
+                                  <>
+                                    <label>跟读句子<textarea value={activity.transcript} onChange={(event) => updateDraftActivity(activity.id, { transcript: event.target.value })} /></label>
+                                    <label>提示说明<textarea value={activity.hint} onChange={(event) => updateDraftActivity(activity.id, { hint: event.target.value })} /></label>
+                                    <label>鼓励语（每行一条）<textarea value={activity.encouragement.join('\n')} onChange={(event) => updateDraftActivity(activity.id, { encouragement: event.target.value.split('\n').map((item) => item.trim()).filter(Boolean) })} /></label>
+                                  </>
+                                ) : null}
+                                {activity.kind === 'read-choice' ? (
+                                  <>
+                                    <label>阅读正文<textarea value={activity.passage} onChange={(event) => updateDraftActivity(activity.id, { passage: event.target.value })} /></label>
+                                    <label>题目<input value={activity.question} onChange={(event) => updateDraftActivity(activity.id, { question: event.target.value })} /></label>
+                                    <label>选项（每行：id | 文案 | emoji）<textarea value={serializeChoiceOptions(activity.options)} onChange={(event) => updateDraftActivity(activity.id, { options: parseChoiceOptions(event.target.value) })} /></label>
+                                    <label>正确选项 ID<input value={activity.correctOptionId} onChange={(event) => updateDraftActivity(activity.id, { correctOptionId: event.target.value })} /></label>
+                                  </>
+                                ) : null}
+                                {activity.kind === 'write-spell' ? (
+                                  <>
+                                    <label>听写句子<textarea value={activity.sentence} onChange={(event) => updateDraftActivity(activity.id, { sentence: event.target.value })} /></label>
+                                    <label>正确答案<input value={activity.answer} onChange={(event) => updateDraftActivity(activity.id, { answer: event.target.value })} /></label>
+                                    <label>提示语（每行一条）<textarea value={activity.tips.join('\n')} onChange={(event) => updateDraftActivity(activity.id, { tips: event.target.value.split('\n').map((item) => item.trim()).filter(Boolean) })} /></label>
+                                  </>
+                                ) : null}
+                                {activity.kind === 'challenge' ? (
+                                  <label>挑战题 JSON<textarea value={JSON.stringify(activity.questions, null, 2)} onChange={(event) => {
+                                    try {
+                                      const questions = JSON.parse(event.target.value)
+                                      updateDraftActivity(activity.id, { questions })
+                                    } catch {
+                                      // Ignore invalid JSON while editing.
+                                    }
+                                  }} /></label>
+                                ) : null}
+                              </div>
+                            </article>
+                          ))}
                         </div>
                         <div className="action-row">
                           <button className="primary-btn" disabled={busyMap['save-draft']} onClick={handleDraftSave}>{busyMap['save-draft'] ? '保存中...' : '保存草稿'}</button>
@@ -2619,7 +3200,7 @@ function App() {
                   <>
                     <div className="section-head">
                       <h3>模型与 OCR 设置</h3>
-                      <p>先选择全局 AI 供应商，再配置这一套方案对应的文本生成、OCR 和语音转写。</p>
+                      <p>先选择全局 AI 供应商，再配置这一套方案对应的文本生成、OCR、语音转写和语音合成。</p>
                     </div>
                     <div className="settings-grid">
                       <article className="settings-card settings-card-wide">
@@ -2663,7 +3244,7 @@ function App() {
                           </label>
                         </div>
                         <div className="settings-note">
-                          <p>这是项目级单选开关。切到 OpenAI 时，文本生成、图片 OCR、口语转写都走 OpenAI；切到阿里系时，文本走 Qwen，口语转写走 DashScope，OCR 走阿里云 OCR。</p>
+                          <p>这是项目级单选开关。切到 OpenAI 时，文本生成、图片 OCR、口语转写和教学音频合成都走 OpenAI；切到阿里系时，文本走 Qwen，口语转写与语音合成走 DashScope，OCR 走阿里云 OCR。</p>
                         </div>
                       </article>
 
@@ -2676,6 +3257,7 @@ function App() {
                               <li><strong>文本模型</strong>：生成单元草稿。</li>
                               <li><strong>OCR 模型</strong>：用于教材图片文字提取。</li>
                               <li><strong>语音转写模型</strong>：用于口语跟读评分前的转写。</li>
+                              <li><strong>TTS 模型</strong>：用于发布前预生成标准教学音频。</li>
                               <li><strong>Reasoning effort</strong>：控制推理深度，值越高通常越稳，但更慢更贵。</li>
                               <li><strong>Verbosity</strong>：控制回答展开程度，不影响 JSON 结构，只影响文字详略。</li>
                               <li><strong>Max output tokens</strong>：输出上限，官方定义里包含可见输出和 reasoning tokens。</li>
@@ -2712,6 +3294,35 @@ function App() {
                               </select>
                               <small className="field-note">{openAiSpeechModelOptions.find((option) => option.value === openAiForm.speechModel)?.note}</small>
                             </label>
+                            <label>
+                              TTS 模型
+                              <select value={openAiForm.ttsModel || 'gpt-4o-mini-tts'} onChange={(event) => updateProviderForm('openai', { ttsModel: event.target.value })}>
+                                {openAiTtsModelOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                              </select>
+                              <small className="field-note">{openAiTtsModelOptions.find((option) => option.value === openAiForm.ttsModel)?.note}</small>
+                            </label>
+                            <label>
+                              TTS 音色
+                              <select value={openAiForm.ttsVoice || 'alloy'} onChange={(event) => updateProviderForm('openai', { ttsVoice: event.target.value })}>
+                                {openAiTtsVoiceOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                              </select>
+                              <small className="field-note">使用 OpenAI 官方内置音色。</small>
+                            </label>
+                            <label>
+                              TTS 格式
+                              <select value={openAiForm.ttsFormat || 'mp3'} onChange={(event) => updateProviderForm('openai', { ttsFormat: event.target.value })}>
+                                {openAiTtsFormatOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                              </select>
+                              <small className="field-note">{openAiTtsFormatOptions.find((option) => option.value === openAiForm.ttsFormat)?.note}</small>
+                            </label>
+                            <label>
+                              TTS 提示词
+                              <textarea
+                                value={openAiForm.ttsInstructions || ''}
+                                onChange={(event) => updateProviderForm('openai', { ttsInstructions: event.target.value })}
+                                placeholder="Read in a warm, patient classroom voice for primary-school English learners."
+                              />
+                            </label>
                             {renderSecretField({
                               fieldId: 'openai-api-key',
                               label: 'API Key',
@@ -2723,11 +3334,11 @@ function App() {
                               <input
                                 type="text"
                                 inputMode="url"
-                                value={openAiForm.proxyUrl || '127.0.0.1:7892'}
+                                value={openAiForm.proxyUrl || ''}
                                 onChange={(event) => updateProviderForm('openai', { proxyUrl: event.target.value })}
-                                placeholder="127.0.0.1:7892"
+                                placeholder={`留空直连；常用代理可填 ${defaultOpenAiProxyUrl}`}
                               />
-                              <small className="field-note">仅 OpenAI 使用。未写协议时会自动按 `http://` 处理，例如 `127.0.0.1:7892`。</small>
+                              <small className="field-note">仅 OpenAI 使用。默认直连；未写协议时会自动按 `http://` 处理。</small>
                             </label>
                             <label>
                               Reasoning effort
@@ -2757,6 +3368,7 @@ function App() {
                               <label>文本输入单价/百万 token<input type="number" step="0.0001" value={openAiForm.pricing.text?.inputPerMillion ?? ''} onChange={(event) => updatePricingOverride('openai', 'text', 'inputPerMillion', event.target.value)} placeholder="默认快照" /></label>
                               <label>文本输出单价/百万 token<input type="number" step="0.0001" value={openAiForm.pricing.text?.outputPerMillion ?? ''} onChange={(event) => updatePricingOverride('openai', 'text', 'outputPerMillion', event.target.value)} placeholder="默认快照" /></label>
                               <label>语音输入单价/百万 token<input type="number" step="0.0001" value={openAiForm.pricing.speech?.inputPerMillion ?? ''} onChange={(event) => updatePricingOverride('openai', 'speech', 'inputPerMillion', event.target.value)} placeholder="默认快照" /></label>
+                              <label>TTS 单次生成费用<input type="number" step="0.0001" value={openAiForm.pricing.tts?.requestCost ?? ''} onChange={(event) => updatePricingOverride('openai', 'tts', 'requestCost', event.target.value)} placeholder="默认快照" /></label>
                               <label>OCR 输入单价/百万 token<input type="number" step="0.0001" value={openAiForm.pricing.ocr?.inputPerMillion ?? ''} onChange={(event) => updatePricingOverride('openai', 'ocr', 'inputPerMillion', event.target.value)} placeholder="默认快照" /></label>
                               <label>OCR 输出单价/百万 token<input type="number" step="0.0001" value={openAiForm.pricing.ocr?.outputPerMillion ?? ''} onChange={(event) => updatePricingOverride('openai', 'ocr', 'outputPerMillion', event.target.value)} placeholder="默认快照" /></label>
                             </div>
@@ -2771,7 +3383,7 @@ function App() {
                         <article className="settings-card">
                           <h4>Qwen 文本与 DashScope 语音</h4>
                           <div className="settings-note">
-                            <p>这里的 <strong>通义 API Key</strong> 只用于 Qwen 文本生成与 DashScope 语音转写，不等于阿里云 OCR 的 AccessKey。</p>
+                            <p>这里的 <strong>通义 API Key</strong> 用于 Qwen 文本生成、DashScope 语音转写和语音合成，不等于阿里云 OCR 的 AccessKey。</p>
                           </div>
                           <div className="editor-grid compact">
                             <label>
@@ -2815,14 +3427,39 @@ function App() {
                               </select>
                               <small className="field-note">{qwenSpeechModelOptions.find((option) => option.value === qwenForm.speechModel)?.note}</small>
                             </label>
+                            <label>
+                              TTS 模型
+                              <select value={qwenForm.ttsModel || 'qwen3-tts-flash'} onChange={(event) => updateProviderForm('qwen', { ttsModel: event.target.value })}>
+                                {qwenTtsModelOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                              </select>
+                              <small className="field-note">{qwenTtsModelOptions.find((option) => option.value === qwenForm.ttsModel)?.note}</small>
+                            </label>
+                            <label>
+                              TTS 音色
+                              <select value={qwenForm.ttsVoice || 'Cherry'} onChange={(event) => updateProviderForm('qwen', { ttsVoice: event.target.value })}>
+                                {qwenTtsVoiceOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                              </select>
+                            </label>
+                            <label>语言类型<input value={qwenForm.ttsLanguageType || 'English'} onChange={(event) => updateProviderForm('qwen', { ttsLanguageType: event.target.value })} placeholder="English" /></label>
+                            <label>
+                              TTS 格式
+                              <select value={qwenForm.ttsFormat || 'wav'} onChange={(event) => updateProviderForm('qwen', { ttsFormat: event.target.value })}>
+                                {qwenTtsFormatOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                              </select>
+                              <small className="field-note">{qwenTtsFormatOptions.find((option) => option.value === qwenForm.ttsFormat)?.note}</small>
+                            </label>
+                            <label>
+                              TTS 提示词
+                              <textarea value={qwenForm.ttsInstructions || ''} onChange={(event) => updateProviderForm('qwen', { ttsInstructions: event.target.value })} placeholder="留空则使用供应商默认播报风格" />
+                            </label>
                           </div>
                           <details className="advanced-settings">
                             <summary>高级价格覆盖</summary>
                             <div className="editor-grid compact">
                               <label>文本输入单价/百万 token<input type="number" step="0.0001" value={qwenForm.pricing.text?.inputPerMillion ?? ''} onChange={(event) => updatePricingOverride('qwen', 'text', 'inputPerMillion', event.target.value)} placeholder="默认快照" /></label>
                               <label>文本输出单价/百万 token<input type="number" step="0.0001" value={qwenForm.pricing.text?.outputPerMillion ?? ''} onChange={(event) => updatePricingOverride('qwen', 'text', 'outputPerMillion', event.target.value)} placeholder="默认快照" /></label>
-                              <label>语音输入单价/百万 token<input type="number" step="0.0001" value={qwenForm.pricing.speech?.inputPerMillion ?? ''} onChange={(event) => updatePricingOverride('qwen', 'speech', 'inputPerMillion', event.target.value)} placeholder="默认快照" /></label>
-                              <label>语音输出单价/百万 token<input type="number" step="0.0001" value={qwenForm.pricing.speech?.outputPerMillion ?? ''} onChange={(event) => updatePricingOverride('qwen', 'speech', 'outputPerMillion', event.target.value)} placeholder="默认快照" /></label>
+                              <label>语音单价/分钟<input type="number" step="0.0001" value={qwenForm.pricing.speech?.perMinute ?? ''} onChange={(event) => updatePricingOverride('qwen', 'speech', 'perMinute', event.target.value)} placeholder="默认快照" /></label>
+                              <label>TTS 输入单价/万字符<input type="number" step="0.0001" value={qwenForm.pricing.tts?.inputPerTenThousandChars ?? ''} onChange={(event) => updatePricingOverride('qwen', 'tts', 'inputPerTenThousandChars', event.target.value)} placeholder="默认快照" /></label>
                             </div>
                           </details>
                           <button className="primary-btn" disabled={busyMap['save-provider-qwen']} onClick={() => handleSaveProvider('qwen')}>
@@ -2938,6 +3575,36 @@ function App() {
             </>
           )}
         </main>
+      ) : null}
+
+      {previewImage ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setPreviewImageId('')}>
+          <div className="image-preview-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <div className="image-preview-head">
+              <strong>{previewImage.fileName}</strong>
+              <small>
+                {previewImageIndex + 1} / {sortedAdminImages.length} · {currentAdminSubjectName}
+              </small>
+            </div>
+            <img className="image-preview-photo" src={previewImage.url} alt={previewImage.fileName} />
+            <div className="action-row compact">
+              <button className="secondary-btn" type="button" disabled={previewImageIndex <= 0} onClick={() => movePreviewImage(-1)}>
+                上一张
+              </button>
+              <button
+                className="secondary-btn"
+                type="button"
+                disabled={previewImageIndex >= sortedAdminImages.length - 1}
+                onClick={() => movePreviewImage(1)}
+              >
+                下一张
+              </button>
+              <button className="primary-btn" type="button" onClick={() => setPreviewImageId('')}>
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
 
       {createUserModalOpen ? (

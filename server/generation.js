@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { jsonrepair } from 'jsonrepair'
 import { estimateUsageCost, getCapabilityPricing } from './pricing.js'
 import { runAliyunOcr } from './providers/aliyun-ocr.js'
 import { extractTextWithOpenAI, generateWithOpenAI } from './providers/openai-provider.js'
@@ -111,17 +112,26 @@ const buildActivities = (payload, vocabulary) => {
   ]
 }
 
-const parseJsonContent = (content) => {
-  const trimmed = content.trim()
+const extractJsonCandidate = (content) => {
+  const trimmed = content.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '')
+  const match = trimmed.match(/\{[\s\S]*\}/)
+  return match ? match[0] : trimmed
+}
+
+export const parseJsonContent = (content) => {
+  const candidate = extractJsonCandidate(content)
   try {
-    return JSON.parse(trimmed)
-  } catch {
-    const match = trimmed.match(/\{[\s\S]*\}/)
-    if (!match) {
+    return JSON.parse(candidate)
+  } catch (directError) {
+    if (!candidate.includes('{')) {
       throw new Error('模型未返回可解析 JSON')
     }
 
-    return JSON.parse(match[0])
+    try {
+      return JSON.parse(jsonrepair(candidate))
+    } catch {
+      throw directError
+    }
   }
 }
 
@@ -171,21 +181,31 @@ export const runOcrForImages = async ({
   insertUsageLog,
   subjectId,
   jobId,
+  onProgress,
 }) => {
   const pages = []
 
-  for (const image of imageRecords) {
-    const result =
-      activeAiVendor === 'openai'
-        ? await extractTextWithOpenAI({
-            setting: openAiSetting,
-            imageBuffer: image.buffer,
-            mimeType: image.mimeType,
-          })
-        : await runAliyunOcr({
-            setting: ocrSetting,
-            imageBuffer: image.buffer,
-          })
+  for (const [index, image] of imageRecords.entries()) {
+    let result
+    try {
+      result =
+        activeAiVendor === 'openai'
+          ? await extractTextWithOpenAI({
+              setting: openAiSetting,
+              imageBuffer: image.buffer,
+              mimeType: image.mimeType,
+            })
+          : await runAliyunOcr({
+              setting: ocrSetting,
+              imageBuffer: image.buffer,
+            })
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'OCR 失败'
+      if (detail.includes('超时')) {
+        throw new Error(`教材 OCR 第 ${index + 1}/${imageRecords.length} 张等待超时，请稍后重试。`)
+      }
+      throw new Error(`教材 OCR 第 ${index + 1}/${imageRecords.length} 张失败：${detail}`)
+    }
 
     const provider = activeAiVendor === 'openai' ? 'openai' : 'aliyun-ocr'
     const model = activeAiVendor === 'openai' ? openAiSetting.ocrModel || openAiSetting.model : ocrSetting.ocrType || 'RecognizeAllText'
@@ -208,6 +228,16 @@ export const runOcrForImages = async ({
     })
 
     pages.push(`## ${image.fileName}\n${result.text}`)
+
+    await onProgress?.({
+      stage: 'ocr',
+      processedImages: index + 1,
+      totalImages: imageRecords.length,
+      message:
+        index + 1 < imageRecords.length
+          ? `正在识别教材图片（${index + 1}/${imageRecords.length}）`
+          : '教材 OCR 已完成，准备整理单元草稿。',
+    })
   }
 
   return pages.join('\n\n')
@@ -221,22 +251,38 @@ export const runDraftGeneration = async ({
   sourceImageIds,
   insertUsageLog,
   jobId,
+  onProgress,
 }) => {
   let response
-  if (providerSetting.provider === 'openai') {
-    response = await generateWithOpenAI({
-      setting: providerSetting,
-      ocrText,
-      subjectName: subject.name,
-    })
-  } else if (providerSetting.provider === 'qwen') {
-    response = await generateWithQwen({
-      setting: providerSetting,
-      ocrText,
-      subjectName: subject.name,
-    })
-  } else {
-    throw new Error('不支持的模型供应商')
+  await onProgress?.({
+    stage: 'draft',
+    processedImages: sourceImageIds.length,
+    totalImages: sourceImageIds.length,
+    message: 'OCR 已完成，正在生成单元草稿。',
+  })
+
+  try {
+    if (providerSetting.provider === 'openai') {
+      response = await generateWithOpenAI({
+        setting: providerSetting,
+        ocrText,
+        subjectName: subject.name,
+      })
+    } else if (providerSetting.provider === 'qwen') {
+      response = await generateWithQwen({
+        setting: providerSetting,
+        ocrText,
+        subjectName: subject.name,
+      })
+    } else {
+      throw new Error('不支持的模型供应商')
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : '草稿生成失败'
+    if (detail.includes('超时')) {
+      throw new Error('单元草稿整理等待超时，前面的 OCR 已完成。请稍后重试，或减少本次图片数量。')
+    }
+    throw new Error(`单元草稿整理失败：${detail}`)
   }
 
   await insertUsageLog({

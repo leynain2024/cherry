@@ -29,14 +29,21 @@ const openAiDefaults = {
   verbosity: 'medium',
   maxOutputTokens: 2048,
   speechModel: 'gpt-4o-mini-transcribe',
+  ttsModel: 'gpt-4o-mini-tts',
+  ttsVoice: 'alloy',
+  ttsFormat: 'mp3',
+  ttsInstructions: 'Read in a warm, patient classroom voice for primary-school English learners.',
   ocrModel: 'gpt-5.2',
-  proxyUrl: '127.0.0.1:7892',
+  proxyUrl: '',
 }
 
 const openAiModelOptions = ['gpt-5.2', 'gpt-5.4']
 const openAiReasoningOptions = ['none', 'low', 'medium', 'high', 'xhigh']
 const openAiVerbosityOptions = ['low', 'medium', 'high']
 const openAiSpeechModelOptions = ['gpt-4o-mini-transcribe', 'gpt-4o-transcribe']
+const openAiTtsModelOptions = ['gpt-4o-mini-tts']
+const openAiTtsVoiceOptions = ['alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'onyx', 'nova', 'sage', 'shimmer', 'verse', 'marin', 'cedar']
+const openAiTtsFormatOptions = ['mp3', 'wav']
 const openAiMaxOutputTokenOptions = [512, 1024, 2048, 4096, 8192, 16384]
 
 const qwenDefaults = {
@@ -48,6 +55,11 @@ const qwenDefaults = {
   temperature: 0.2,
   maxOutputTokens: 2048,
   speechModel: 'qwen3-asr-flash',
+  ttsModel: 'qwen3-tts-flash',
+  ttsVoice: 'Cherry',
+  ttsLanguageType: 'English',
+  ttsFormat: 'wav',
+  ttsInstructions: '',
 }
 
 const qwenApiModeOptions = ['native', 'compatible']
@@ -55,6 +67,59 @@ const qwenModelOptions = ['qwen-turbo', 'qwen-plus', 'qwen-max']
 const qwenTemperatureOptions = [0, 0.2, 0.5, 0.8, 1]
 const qwenMaxTokenOptions = [512, 1024, 2048, 4096]
 const qwenSpeechModelOptions = ['qwen3-asr-flash', 'qwen-audio-turbo']
+const qwenTtsModelOptions = ['qwen3-tts-flash']
+const qwenTtsVoiceOptions = [
+  'Cherry',
+  'Serena',
+  'Ethan',
+  'Chelsie',
+  'Momo',
+  'Vivian',
+  'Moon',
+  'Maia',
+  'Kai',
+  'Nofish',
+  'Bella',
+  'Jennifer',
+  'Ryan',
+  'Katerina',
+  'Aiden',
+  'Eldric Sage',
+  'Mia',
+  'Mochi',
+  'Bellona',
+  'Vincent',
+  'Bunny',
+  'Neil',
+  'Elias',
+  'Arthur',
+  'Nini',
+  'Ebona',
+  'Seren',
+  'Pip',
+  'Stella',
+  'Bodega',
+  'Sonrisa',
+  'Alek',
+  'Dolce',
+  'Sohee',
+  'Ono Anna',
+  'Lenn',
+  'Emilien',
+  'Andre',
+  'Radio Gol',
+  'Jada',
+  'Dylan',
+  'Li',
+  'Marcus',
+  'Roy',
+  'Peter',
+  'Sunny',
+  'Eric',
+  'Rocky',
+  'Kiki',
+]
+const qwenTtsFormatOptions = ['wav', 'mp3']
 
 const aliyunOcrDefaults = {
   apiMode: 'sdk',
@@ -101,9 +166,15 @@ const normalizeOpenAIProviderInput = (input = {}) => {
     ? Number(input.maxOutputTokens)
     : openAiDefaults.maxOutputTokens
   const speechModel = openAiSpeechModelOptions.includes(extra.speechModel) ? extra.speechModel : openAiDefaults.speechModel
+  const ttsModel = openAiTtsModelOptions.includes(extra.ttsModel) ? extra.ttsModel : openAiDefaults.ttsModel
+  const ttsFormat = openAiTtsFormatOptions.includes(extra.ttsFormat) ? extra.ttsFormat : openAiDefaults.ttsFormat
   const ocrModel = openAiModelOptions.includes(extra.ocrModel) ? extra.ocrModel : openAiDefaults.ocrModel
-  const proxyUrl =
-    typeof extra.proxyUrl === 'string' && extra.proxyUrl.trim() ? extra.proxyUrl.trim() : openAiDefaults.proxyUrl
+  const proxyUrl = typeof extra.proxyUrl === 'string' ? extra.proxyUrl.trim() : openAiDefaults.proxyUrl
+  const ttsVoice = openAiTtsVoiceOptions.includes(extra.ttsVoice) ? extra.ttsVoice : openAiDefaults.ttsVoice
+  const ttsInstructions =
+    typeof extra.ttsInstructions === 'string' && extra.ttsInstructions.trim()
+      ? extra.ttsInstructions.trim()
+      : openAiDefaults.ttsInstructions
 
   return {
     apiMode: openAiDefaults.apiMode,
@@ -117,6 +188,10 @@ const normalizeOpenAIProviderInput = (input = {}) => {
     extra: {
       verbosity,
       speechModel,
+      ttsModel,
+      ttsVoice,
+      ttsFormat,
+      ttsInstructions,
       ocrModel,
       proxyUrl,
     },
@@ -139,6 +214,15 @@ const normalizeQwenProviderInput = (input = {}) => {
       : qwenDefaults.maxOutputTokens,
     extra: {
       speechModel: qwenSpeechModelOptions.includes(extra.speechModel) ? extra.speechModel : qwenDefaults.speechModel,
+      ttsModel: qwenTtsModelOptions.includes(extra.ttsModel) ? extra.ttsModel : qwenDefaults.ttsModel,
+      ttsVoice: qwenTtsVoiceOptions.includes(extra.ttsVoice) ? extra.ttsVoice : qwenDefaults.ttsVoice,
+      ttsLanguageType:
+        typeof extra.ttsLanguageType === 'string' && extra.ttsLanguageType.trim()
+          ? extra.ttsLanguageType.trim()
+          : qwenDefaults.ttsLanguageType,
+      ttsFormat: qwenTtsFormatOptions.includes(extra.ttsFormat) ? extra.ttsFormat : qwenDefaults.ttsFormat,
+      ttsInstructions:
+        typeof extra.ttsInstructions === 'string' && extra.ttsInstructions.trim() ? extra.ttsInstructions.trim() : qwenDefaults.ttsInstructions,
     },
     pricing: normalizePricing(input.pricing),
   }
@@ -239,12 +323,32 @@ const speakingRecordingRowToObject = (row) => ({
   errorMessage: row.error_message || '',
 })
 
+const generationJobRowToObject = (row) => ({
+  id: row.id,
+  subjectId: row.subject_id,
+  imageIds: parseJson(row.image_ids, []),
+  provider: row.provider,
+  model: row.model,
+  status: row.status,
+  stage: row.stage || 'queued',
+  processedImages: row.processed_images || 0,
+  totalImages: row.total_images || 0,
+  message: row.message || '',
+  hasOcrText: Boolean(row.ocr_text),
+  draftUnitId: row.draft_unit_id || '',
+  errorMessage: row.error_message || '',
+  createdAt: row.created_at,
+  updatedAt: row.updated_at || row.created_at,
+})
+
 export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
   const dataDir = path.join(rootDir, 'data')
   const uploadsDir = path.join(dataDir, 'uploads')
   const recordingsDir = path.join(dataDir, 'recordings')
+  const audioAssetsDir = path.join(dataDir, 'audio-assets')
   fs.mkdirSync(uploadsDir, { recursive: true })
   fs.mkdirSync(recordingsDir, { recursive: true })
+  fs.mkdirSync(audioAssetsDir, { recursive: true })
 
   const db = new Database(path.join(dataDir, 'haibao.db'))
   db.pragma('journal_mode = WAL')
@@ -365,10 +469,15 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
       provider TEXT NOT NULL,
       model TEXT NOT NULL,
       status TEXT NOT NULL,
+      stage TEXT NOT NULL DEFAULT 'queued',
+      processed_images INTEGER NOT NULL DEFAULT 0,
+      total_images INTEGER NOT NULL DEFAULT 0,
+      message TEXT,
       draft_unit_id TEXT,
       ocr_text TEXT,
       error_message TEXT,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS provider_settings (
       provider TEXT PRIMARY KEY,
@@ -412,6 +521,24 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
     db.exec('ALTER TABLE users ADD COLUMN subject_id TEXT')
   }
 
+  const generationJobColumns = db.prepare('PRAGMA table_info(generation_jobs)').all()
+  if (!generationJobColumns.some((column) => column.name === 'stage')) {
+    db.exec(`ALTER TABLE generation_jobs ADD COLUMN stage TEXT NOT NULL DEFAULT 'queued'`)
+  }
+  if (!generationJobColumns.some((column) => column.name === 'processed_images')) {
+    db.exec('ALTER TABLE generation_jobs ADD COLUMN processed_images INTEGER NOT NULL DEFAULT 0')
+  }
+  if (!generationJobColumns.some((column) => column.name === 'total_images')) {
+    db.exec('ALTER TABLE generation_jobs ADD COLUMN total_images INTEGER NOT NULL DEFAULT 0')
+  }
+  if (!generationJobColumns.some((column) => column.name === 'message')) {
+    db.exec('ALTER TABLE generation_jobs ADD COLUMN message TEXT')
+  }
+  if (!generationJobColumns.some((column) => column.name === 'updated_at')) {
+    db.exec('ALTER TABLE generation_jobs ADD COLUMN updated_at TEXT')
+    db.prepare('UPDATE generation_jobs SET updated_at = created_at WHERE updated_at IS NULL').run()
+  }
+
   const providerDefaults = [
     {
       provider: 'openai',
@@ -426,6 +553,10 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
       extra: {
         verbosity: openAiDefaults.verbosity,
         speechModel: openAiDefaults.speechModel,
+        ttsModel: openAiDefaults.ttsModel,
+        ttsVoice: openAiDefaults.ttsVoice,
+        ttsFormat: openAiDefaults.ttsFormat,
+        ttsInstructions: openAiDefaults.ttsInstructions,
         ocrModel: openAiDefaults.ocrModel,
         proxyUrl: openAiDefaults.proxyUrl,
       },
@@ -443,6 +574,11 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
       maxOutputTokens: qwenDefaults.maxOutputTokens,
       extra: {
         speechModel: qwenDefaults.speechModel,
+        ttsModel: qwenDefaults.ttsModel,
+        ttsVoice: qwenDefaults.ttsVoice,
+        ttsLanguageType: qwenDefaults.ttsLanguageType,
+        ttsFormat: qwenDefaults.ttsFormat,
+        ttsInstructions: qwenDefaults.ttsInstructions,
       },
       pricing: normalizePricing({}),
     },
@@ -597,20 +733,35 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
     (@id, @subjectId, @title, @source, @stage, @goal, @difficulty, @unlockOrder, @coverEmoji, @themeColor, @status, @contentOrigin, @sourceImageIds, @rewardRuleJson, @vocabularyJson, @patternsJson, @readingJson, @activitiesJson, @createdAt, @updatedAt)
   `)
 
-  const normalizeProviderSetting = (row) => ({
-    provider: row.provider,
-    apiMode: row.api_mode,
-    model: row.model,
-    apiKey: row.api_key,
-    baseUrl: row.base_url,
-    endpoint: row.endpoint,
-    reasoningEffort: row.reasoning_effort,
-    temperature: row.temperature,
-    maxOutputTokens: row.max_output_tokens,
-    ...parseJson(row.extra_json, {}),
-    pricing: normalizePricing(parseJson(row.pricing_json, {})),
-    updatedAt: row.updated_at,
-  })
+  const normalizeProviderSetting = (row) => {
+    const normalized = normalizeProviderInput(row.provider, {
+      apiMode: row.api_mode,
+      model: row.model,
+      apiKey: row.api_key,
+      baseUrl: row.base_url,
+      endpoint: row.endpoint,
+      reasoningEffort: row.reasoning_effort,
+      temperature: row.temperature,
+      maxOutputTokens: row.max_output_tokens,
+      extra: parseJson(row.extra_json, {}),
+      pricing: normalizePricing(parseJson(row.pricing_json, {})),
+    })
+
+    return {
+      provider: row.provider,
+      apiMode: normalized.apiMode,
+      model: normalized.model,
+      apiKey: normalized.apiKey,
+      baseUrl: normalized.baseUrl,
+      endpoint: normalized.endpoint,
+      reasoningEffort: normalized.reasoningEffort,
+      temperature: normalized.temperature,
+      maxOutputTokens: normalized.maxOutputTokens,
+      ...normalized.extra,
+      pricing: normalized.pricing,
+      updatedAt: row.updated_at,
+    }
+  }
 
   const getProjectSettings = () => {
     const row = db.prepare('SELECT value_json FROM app_settings WHERE key = ?').get('project_settings')
@@ -691,6 +842,7 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
   return {
     uploadsDir,
     recordingsDir,
+    audioAssetsDir,
     isBootstrapped() {
       return db.prepare('SELECT COUNT(*) AS count FROM admin_users').get().count > 0
     },
@@ -1048,7 +1200,7 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
     },
     getImagesByIds(subjectId, imageIds) {
       const placeholders = imageIds.map(() => '?').join(', ')
-      return db
+      const rows = db
         .prepare(`SELECT * FROM subject_images WHERE subject_id = ? AND id IN (${placeholders})`)
         .all(subjectId, ...imageIds)
         .map((image) => ({
@@ -1059,6 +1211,8 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
           uploadedAt: image.uploaded_at,
           pageLabel: image.page_label,
         }))
+      const orderMap = new Map(imageIds.map((id, index) => [id, index]))
+      return rows.sort((left, right) => (orderMap.get(left.id) ?? 0) - (orderMap.get(right.id) ?? 0))
     },
     getSubject(subjectId) {
       const subject = findSubject.get(subjectId)
@@ -1188,6 +1342,7 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
       return this.getProviderSetting(provider)
     },
     createGenerationJob({ subjectId, imageIds, provider, model }) {
+      const createdAt = now()
       const job = {
         id: `job-${randomUUID()}`,
         subjectId,
@@ -1195,33 +1350,125 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
         provider,
         model,
         status: 'running',
-        createdAt: now(),
+        stage: 'queued',
+        processedImages: 0,
+        totalImages: imageIds.length,
+        message: '已加入生成队列，等待开始。',
+        createdAt,
+        updatedAt: createdAt,
       }
       db.prepare(`
-        INSERT INTO generation_jobs (id, subject_id, image_ids, provider, model, status, created_at)
-        VALUES (@id, @subjectId, @imageIdsJson, @provider, @model, @status, @createdAt)
+        INSERT INTO generation_jobs
+        (id, subject_id, image_ids, provider, model, status, stage, processed_images, total_images, message, created_at, updated_at)
+        VALUES
+        (@id, @subjectId, @imageIdsJson, @provider, @model, @status, @stage, @processedImages, @totalImages, @message, @createdAt, @updatedAt)
       `).run({
         ...job,
         imageIdsJson: serializeJson(imageIds),
       })
       return job
     },
+    getGenerationJob(jobId) {
+      const row = db.prepare('SELECT * FROM generation_jobs WHERE id = ?').get(jobId)
+      return row ? generationJobRowToObject(row) : null
+    },
+    getGenerationJobOcrText(jobId) {
+      const row = db.prepare('SELECT ocr_text FROM generation_jobs WHERE id = ?').get(jobId)
+      return row?.ocr_text || ''
+    },
+    updateGenerationJobProgress({ jobId, stage, processedImages, totalImages, message }) {
+      const existing = this.getGenerationJob(jobId)
+      if (!existing) {
+        return null
+      }
+
+      db.prepare(`
+        UPDATE generation_jobs
+        SET stage = ?,
+            processed_images = ?,
+            total_images = ?,
+            message = ?,
+            updated_at = ?
+        WHERE id = ?
+      `).run(
+        stage || existing.stage,
+        processedImages ?? existing.processedImages,
+        totalImages ?? existing.totalImages,
+        message ?? existing.message,
+        now(),
+        jobId,
+      )
+
+      return this.getGenerationJob(jobId)
+    },
+    saveGenerationJobOcrText({ jobId, ocrText }) {
+      db.prepare(`
+        UPDATE generation_jobs
+        SET ocr_text = ?,
+            updated_at = ?
+        WHERE id = ?
+      `).run(ocrText, now(), jobId)
+
+      return this.getGenerationJob(jobId)
+    },
     completeGenerationJob({ jobId, draftUnitId, ocrText }) {
       db.prepare(`
         UPDATE generation_jobs
         SET status = 'success',
+            stage = 'completed',
+            processed_images = total_images,
+            message = '单元草稿已生成完成。',
             draft_unit_id = ?,
-            ocr_text = ?
+            ocr_text = ?,
+            updated_at = ?
         WHERE id = ?
-      `).run(draftUnitId, ocrText, jobId)
+      `).run(draftUnitId, ocrText, now(), jobId)
+    },
+    createDraftRetryJob({ sourceJobId, provider, model, message }) {
+      const sourceJob = db.prepare('SELECT * FROM generation_jobs WHERE id = ?').get(sourceJobId)
+      if (!sourceJob) {
+        return null
+      }
+
+      const createdAt = now()
+      const retryJob = {
+        id: `job-${randomUUID()}`,
+        subjectId: sourceJob.subject_id,
+        imageIds: parseJson(sourceJob.image_ids, []),
+        provider,
+        model,
+        status: 'running',
+        stage: 'draft',
+        processedImages: Number(sourceJob.total_images || 0),
+        totalImages: Number(sourceJob.total_images || 0),
+        message: message || '正在基于已完成的 OCR 结果重试草稿整理。',
+        ocrText: sourceJob.ocr_text || '',
+        createdAt,
+        updatedAt: createdAt,
+      }
+
+      db.prepare(`
+        INSERT INTO generation_jobs
+        (id, subject_id, image_ids, provider, model, status, stage, processed_images, total_images, message, ocr_text, created_at, updated_at)
+        VALUES
+        (@id, @subjectId, @imageIdsJson, @provider, @model, @status, @stage, @processedImages, @totalImages, @message, @ocrText, @createdAt, @updatedAt)
+      `).run({
+        ...retryJob,
+        imageIdsJson: serializeJson(retryJob.imageIds),
+      })
+
+      return this.getGenerationJob(retryJob.id)
     },
     failGenerationJob({ jobId, errorMessage }) {
       db.prepare(`
         UPDATE generation_jobs
         SET status = 'failed',
-            error_message = ?
+            stage = 'failed',
+            message = ?,
+            error_message = ?,
+            updated_at = ?
         WHERE id = ?
-      `).run(errorMessage, jobId)
+      `).run(errorMessage, errorMessage, now(), jobId)
     },
     insertUsageLog({
       timestamp,
@@ -1329,6 +1576,7 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
       return {
         filePath: row.file_path,
         mimeType: row.mime_type,
+        durationSeconds: row.duration_seconds || 0,
       }
     },
     updateSpeakingRecordingEvaluation(userId, recordingId, result) {

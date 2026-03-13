@@ -230,6 +230,7 @@ export const evaluateSpeakingSubmission = async ({
   audioBuffer,
   mimeType,
   fileName,
+  durationSeconds = 0,
   targetTranscript,
   passScore = STRICT_PASS_SCORE,
   insertUsageLog,
@@ -258,6 +259,10 @@ export const evaluateSpeakingSubmission = async ({
   const provider = activeAiVendor === 'openai' ? 'openai' : 'qwen'
   const model = activeAiVendor === 'openai' ? openAiSetting.speechModel || 'gpt-4o-mini-transcribe' : qwenSetting.speechModel || 'qwen3-asr-flash'
   const pricing = getCapabilityPricing(provider, 'speech', activeAiVendor === 'openai' ? openAiSetting.pricing : qwenSetting.pricing)
+  const billableUsage = {
+    ...transcription.usage,
+    seconds: transcription.usage.seconds || durationSeconds || 0,
+  }
 
   await insertUsageLog({
     timestamp: new Date().toISOString(),
@@ -267,13 +272,14 @@ export const evaluateSpeakingSubmission = async ({
     inputTokens: transcription.usage.inputTokens || 0,
     outputTokens: transcription.usage.outputTokens || 0,
     totalTokens: transcription.usage.totalTokens || 0,
-    estimatedCost: estimateUsageCost(pricing, transcription.usage),
+    estimatedCost: estimateUsageCost(pricing, billableUsage),
     currency: provider === 'openai' ? 'USD' : 'CNY',
     status: 'success',
     details: {
       targetTranscript,
       transcript: transcription.text,
       score: scoreResult.score,
+      durationSeconds: billableUsage.seconds,
     },
   })
 

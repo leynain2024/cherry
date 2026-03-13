@@ -52,7 +52,332 @@ afterEach(() => {
   tempDirs.splice(0).forEach((dir) => fs.rmSync(dir, { recursive: true, force: true }))
 })
 
+const waitForGenerationJob = async (app, adminCookie, jobId) => {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const response = await request(app).get(`/api/generation-jobs/${jobId}`).set('Cookie', adminCookie)
+    if (response.body.status === 'success' || response.body.status === 'failed') {
+      return response
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+
+  throw new Error(`generation job ${jobId} did not finish in time`)
+}
+
 describe('server app', () => {
+  it('preserves the selected image order when generating a draft', async () => {
+    const seenImageFileNames = []
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'haibao-order-'))
+    tempDirs.push(dir)
+    const app = createApp({
+      rootDir: dir,
+      services: {
+        runOcrForImages: async ({ imageRecords }) => {
+          seenImageFileNames.push(...imageRecords.map((image) => image.fileName))
+          return 'OCR text'
+        },
+        runDraftGeneration: async ({ subjectId, sourceImageIds }) => ({
+          id: 'draft-order',
+          subjectId,
+          title: 'Draft Order',
+          source: '教材图片整理',
+          stage: 'Stage',
+          goal: 'Goal',
+          difficulty: 'Starter',
+          unlockOrder: 1,
+          coverEmoji: '📘',
+          themeColor: '#48a8f6',
+          status: 'draft',
+          contentOrigin: 'imported',
+          sourceImageIds,
+          rewardRule: {
+            starsPerComplete: 2,
+            starsPerPerfect: 3,
+            unlockAtStars: 8,
+            reviewTriggerMistakes: 2,
+          },
+          vocabulary: [],
+          patterns: [],
+          reading: {
+            id: 'reading-1',
+            title: 'Reading',
+            content: '',
+            audioText: '',
+            question: '',
+          },
+          activities: [],
+        }),
+      },
+    })
+    const { adminCookie, subjectId } = await bootstrapAdminAndUser(app)
+
+    const upload = await request(app)
+      .post(`/api/subjects/${subjectId}/images`)
+      .set('Cookie', adminCookie)
+      .attach('images', Buffer.from('a'), { filename: 'page-10.png', contentType: 'image/png' })
+      .attach('images', Buffer.from('b'), { filename: 'page-2.png', contentType: 'image/png' })
+
+    expect(upload.statusCode).toBe(201)
+
+    const selectedImageIds = [upload.body[1].id, upload.body[0].id]
+    const generate = await request(app)
+      .post(`/api/subjects/${subjectId}/generate-unit-draft`)
+      .set('Cookie', adminCookie)
+      .send({ imageIds: selectedImageIds })
+
+    expect(generate.statusCode).toBe(202)
+    const finishedJob = await waitForGenerationJob(app, adminCookie, generate.body.id)
+    expect(seenImageFileNames).toEqual(['page-2.png', 'page-10.png'])
+    expect(finishedJob.body.imageIds).toEqual(selectedImageIds)
+    expect(finishedJob.body.draftUnitId).toBe('draft-order')
+  })
+
+  it('stores generated drafts under the requested subject even if a service returns a mismatched subject id', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'haibao-subject-'))
+    tempDirs.push(dir)
+    const app = createApp({
+      rootDir: dir,
+      services: {
+        runOcrForImages: async () => 'OCR text',
+        runDraftGeneration: async ({ sourceImageIds }) => ({
+          id: 'draft-subject-guard',
+          subjectId: 'subject-haibao-experience',
+          title: 'Draft Subject Guard',
+          source: '教材图片整理',
+          stage: 'Stage',
+          goal: 'Goal',
+          difficulty: 'Starter',
+          unlockOrder: 1,
+          coverEmoji: '📘',
+          themeColor: '#48a8f6',
+          status: 'draft',
+          contentOrigin: 'imported',
+          sourceImageIds,
+          rewardRule: {
+            starsPerComplete: 2,
+            starsPerPerfect: 3,
+            unlockAtStars: 8,
+            reviewTriggerMistakes: 2,
+          },
+          vocabulary: [],
+          patterns: [],
+          reading: {
+            id: 'reading-guard',
+            title: 'Reading',
+            content: '',
+            audioText: '',
+            question: '',
+          },
+          activities: [],
+        }),
+      },
+    })
+
+    const { adminCookie } = await bootstrapAdminAndUser(app)
+
+    const newSubject = await request(app).post('/api/subjects').set('Cookie', adminCookie).send({
+      name: '新概念英语',
+      description: '测试学科',
+    })
+    expect(newSubject.statusCode).toBe(201)
+
+    const upload = await request(app)
+      .post(`/api/subjects/${newSubject.body.id}/images`)
+      .set('Cookie', adminCookie)
+      .attach('images', Buffer.from('a'), { filename: 'page-1.png', contentType: 'image/png' })
+    expect(upload.statusCode).toBe(201)
+
+    const generate = await request(app)
+      .post(`/api/subjects/${newSubject.body.id}/generate-unit-draft`)
+      .set('Cookie', adminCookie)
+      .send({ imageIds: [upload.body[0].id] })
+    expect(generate.statusCode).toBe(202)
+
+    const finishedJob = await waitForGenerationJob(app, adminCookie, generate.body.id)
+    expect(finishedJob.body.status).toBe('success')
+
+    const adminState = await request(app).get('/api/admin/state').set('Cookie', adminCookie)
+    const generatedDraft = adminState.body.drafts.find((draft) => draft.id === 'draft-subject-guard')
+    expect(generatedDraft.subjectId).toBe(newSubject.body.id)
+  })
+
+  it('generates lesson audio before publishing a draft', async () => {
+    const generatedAudioPayloads = []
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'haibao-tts-'))
+    tempDirs.push(dir)
+    const app = createApp({
+      rootDir: dir,
+      services: {
+        runOcrForImages: async () => 'OCR text',
+        runDraftGeneration: async ({ subjectId, sourceImageIds }) => ({
+          id: 'draft-tts',
+          subjectId,
+          title: 'Draft TTS',
+          source: '教材图片整理',
+          stage: 'Stage',
+          goal: 'Goal',
+          difficulty: 'Starter',
+          unlockOrder: 1,
+          coverEmoji: '📘',
+          themeColor: '#48a8f6',
+          status: 'draft',
+          contentOrigin: 'imported',
+          sourceImageIds,
+          rewardRule: {
+            starsPerComplete: 2,
+            starsPerPerfect: 3,
+            unlockAtStars: 8,
+            reviewTriggerMistakes: 2,
+          },
+          vocabulary: [],
+          patterns: [],
+          reading: {
+            id: 'reading-1',
+            title: 'Reading',
+            content: '',
+            audioText: '',
+            question: '',
+          },
+          activities: [
+            {
+              id: 'listen-1',
+              title: '听音选意思',
+              prompt: '听一听',
+              skill: 'listen',
+              kind: 'listen-choice',
+              durationMinutes: 2,
+              audioText: 'Hello class',
+              question: 'What did you hear?',
+              options: [{ id: 'a', label: 'Hello', emoji: '⭐' }],
+              correctOptionId: 'a',
+            },
+          ],
+        }),
+        generateUnitAudioAssets: async ({ unit, activeAiVendor }) => {
+          generatedAudioPayloads.push({ unitId: unit.id, activeAiVendor })
+          return {
+            ...unit,
+            activities: unit.activities.map((activity) =>
+              activity.kind === 'listen-choice'
+                ? {
+                    ...activity,
+                    audioUrl: '/audio-assets/draft-tts-listen-1.mp3',
+                    audioMimeType: 'audio/mpeg',
+                  }
+                : activity,
+            ),
+          }
+        },
+      },
+    })
+    const { adminCookie, subjectId } = await bootstrapAdminAndUser(app)
+
+    const upload = await request(app)
+      .post(`/api/subjects/${subjectId}/images`)
+      .set('Cookie', adminCookie)
+      .attach('images', Buffer.from('a'), { filename: 'page-1.png', contentType: 'image/png' })
+    expect(upload.statusCode).toBe(201)
+
+    const generate = await request(app)
+      .post(`/api/subjects/${subjectId}/generate-unit-draft`)
+      .set('Cookie', adminCookie)
+      .send({ imageIds: [upload.body[0].id] })
+    expect(generate.statusCode).toBe(202)
+
+    const finishedJob = await waitForGenerationJob(app, adminCookie, generate.body.id)
+    expect(finishedJob.body.status).toBe('success')
+
+    const publish = await request(app).post('/api/drafts/draft-tts/publish').set('Cookie', adminCookie)
+    expect(publish.statusCode).toBe(200)
+    expect(generatedAudioPayloads).toEqual([{ unitId: 'draft-tts', activeAiVendor: 'openai' }])
+    expect(publish.body.status).toBe('published')
+    expect(publish.body.activities[0].audioUrl).toBe('/audio-assets/draft-tts-listen-1.mp3')
+  })
+
+  it('retries draft generation with cached ocr text without rerunning ocr', async () => {
+    let ocrCallCount = 0
+    let draftCallCount = 0
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'haibao-retry-'))
+    tempDirs.push(dir)
+    const app = createApp({
+      rootDir: dir,
+      services: {
+        runOcrForImages: async () => {
+          ocrCallCount += 1
+          return 'OCR text from cache'
+        },
+        runDraftGeneration: async ({ subjectId, sourceImageIds }) => {
+          draftCallCount += 1
+          if (draftCallCount === 1) {
+            throw new Error('Expected \',\' or \'}\' after property value in JSON at position 12')
+          }
+
+          return {
+            id: 'draft-retry',
+            subjectId,
+            title: 'Draft Retry',
+            source: '教材图片整理',
+            stage: 'Stage',
+            goal: 'Goal',
+            difficulty: 'Starter',
+            unlockOrder: 1,
+            coverEmoji: '📘',
+            themeColor: '#48a8f6',
+            status: 'draft',
+            contentOrigin: 'imported',
+            sourceImageIds,
+            rewardRule: {
+              starsPerComplete: 2,
+              starsPerPerfect: 3,
+              unlockAtStars: 8,
+              reviewTriggerMistakes: 2,
+            },
+            vocabulary: [],
+            patterns: [],
+            reading: {
+              id: 'reading-retry',
+              title: 'Reading',
+              content: '',
+              audioText: '',
+              question: '',
+            },
+            activities: [],
+          }
+        },
+      },
+    })
+
+    const { adminCookie, subjectId } = await bootstrapAdminAndUser(app)
+
+    const upload = await request(app)
+      .post(`/api/subjects/${subjectId}/images`)
+      .set('Cookie', adminCookie)
+      .attach('images', Buffer.from('a'), { filename: 'page-1.png', contentType: 'image/png' })
+    expect(upload.statusCode).toBe(201)
+
+    const generate = await request(app)
+      .post(`/api/subjects/${subjectId}/generate-unit-draft`)
+      .set('Cookie', adminCookie)
+      .send({ imageIds: [upload.body[0].id] })
+    expect(generate.statusCode).toBe(202)
+
+    const failedJob = await waitForGenerationJob(app, adminCookie, generate.body.id)
+    expect(failedJob.body.status).toBe('failed')
+    expect(failedJob.body.hasOcrText).toBe(true)
+    expect(ocrCallCount).toBe(1)
+    expect(draftCallCount).toBe(1)
+
+    const retry = await request(app).post(`/api/generation-jobs/${failedJob.body.id}/retry-draft`).set('Cookie', adminCookie)
+    expect(retry.statusCode).toBe(202)
+
+    const retriedJob = await waitForGenerationJob(app, adminCookie, retry.body.id)
+    expect(retriedJob.body.status).toBe('success')
+    expect(retriedJob.body.draftUnitId).toBe('draft-retry')
+    expect(ocrCallCount).toBe(1)
+    expect(draftCallCount).toBe(2)
+  })
+
   it('requires a user session for app data', async () => {
     const app = makeApp()
     const response = await request(app).get('/api/app-data')

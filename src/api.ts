@@ -5,6 +5,7 @@ import type {
   ProjectSettings,
   ProviderId,
   ProviderSetting,
+  GenerationJob,
   SpeakingRecording,
   SpeakingEvaluationResult,
   Subject,
@@ -150,9 +151,16 @@ export const uploadSubjectImages = async (subjectId: string, files: File[]) => {
 }
 
 export const generateUnitDraft = (subjectId: string, imageIds: string[]) =>
-  jsonFetch<Unit>(`/api/subjects/${subjectId}/generate-unit-draft`, {
+  jsonFetch<GenerationJob>(`/api/subjects/${subjectId}/generate-unit-draft`, {
     method: 'POST',
     body: JSON.stringify({ imageIds }),
+  })
+
+export const getGenerationJob = (jobId: string) => jsonFetch<GenerationJob>(`/api/generation-jobs/${jobId}`)
+
+export const retryGenerationDraft = (jobId: string) =>
+  jsonFetch<GenerationJob>(`/api/generation-jobs/${jobId}/retry-draft`, {
+    method: 'POST',
   })
 
 export const updateDraft = (draftId: string, payload: Partial<Unit>) =>
@@ -187,6 +195,11 @@ export const saveProviderSetting = (provider: ProviderId, payload: ProviderSetti
       extra: {
         verbosity: payload.verbosity || 'medium',
         speechModel: payload.speechModel || '',
+        ttsModel: payload.ttsModel || '',
+        ttsVoice: payload.ttsVoice || '',
+        ttsFormat: payload.ttsFormat || '',
+        ttsInstructions: payload.ttsInstructions || '',
+        ttsLanguageType: payload.ttsLanguageType || '',
         ocrModel: payload.ocrModel || '',
         proxyUrl: payload.proxyUrl || '',
         accessKeyId: payload.accessKeyId || '',

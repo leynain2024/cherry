@@ -6,6 +6,7 @@ import { parse, serialize } from 'cookie'
 import { createDataStore } from './db.js'
 import { runDraftGeneration, runOcrForImages } from './generation.js'
 import { evaluateSpeakingSubmission } from './speaking.js'
+import { generateUnitAudioAssets } from './tts.js'
 
 const SESSION_COOKIE = 'haibao_admin_session'
 const USER_SESSION_COOKIE = 'haibao_user_session'
@@ -61,9 +62,11 @@ export const createApp = ({ rootDir = process.cwd(), services = {} } = {}) => {
   const draftGenerationService = services.runDraftGeneration || runDraftGeneration
   const ocrService = services.runOcrForImages || runOcrForImages
   const speakingService = services.evaluateSpeakingSubmission || evaluateSpeakingSubmission
+  const unitAudioService = services.generateUnitAudioAssets || generateUnitAudioAssets
 
   app.use(express.json({ limit: '5mb' }))
   app.use('/uploads', express.static(store.uploadsDir))
+  app.use('/audio-assets', express.static(store.audioAssetsDir))
 
   app.get('/api/app-data', userAuthMiddleware(store), (req, res) => {
     res.json({
@@ -393,11 +396,6 @@ export const createApp = ({ rootDir = process.cwd(), services = {} } = {}) => {
       return
     }
 
-    const imageRecords = images.map((image) => ({
-      ...image,
-      buffer: fs.readFileSync(image.filePath),
-      mimeType: detectImageMimeType(image.filePath),
-    }))
     const job = store.createGenerationJob({
       subjectId: subject.id,
       imageIds,
@@ -405,42 +403,156 @@ export const createApp = ({ rootDir = process.cwd(), services = {} } = {}) => {
       model: providerSetting.model,
     })
 
-    try {
-      const ocrText = await ocrService({
-        activeAiVendor: provider,
-        openAiSetting: store.getProviderSetting('openai'),
-        ocrSetting,
-        imageRecords,
-        insertUsageLog: (payload) => store.insertUsageLog(payload),
-        subjectId: subject.id,
-        jobId: job.id,
-      })
+    res.status(202).json(store.getGenerationJob(job.id))
 
-      const draftUnit = await draftGenerationService({
-        providerSetting,
-        subject,
-        ocrText,
-        subjectId: subject.id,
-        sourceImageIds: imageIds,
-        insertUsageLog: (payload) => store.insertUsageLog(payload),
-        jobId: job.id,
-      })
+    void (async () => {
+      try {
+        const imageRecords = images.map((image) => ({
+          ...image,
+          buffer: fs.readFileSync(image.filePath),
+          mimeType: detectImageMimeType(image.filePath),
+        }))
 
-      store.insertUnit(draftUnit)
-      store.completeGenerationJob({
-        jobId: job.id,
-        draftUnitId: draftUnit.id,
-        ocrText,
-      })
+        store.updateGenerationJobProgress({
+          jobId: job.id,
+          stage: 'ocr',
+          processedImages: 0,
+          totalImages: imageRecords.length,
+          message: `正在识别教材图片（0/${imageRecords.length}）`,
+        })
 
-      res.status(201).json(draftUnit)
-    } catch (error) {
-      store.failGenerationJob({
-        jobId: job.id,
-        errorMessage: error instanceof Error ? error.message : '生成失败',
-      })
-      res.status(500).json({ error: error instanceof Error ? error.message : '生成失败' })
+        const ocrText = await ocrService({
+          activeAiVendor: provider,
+          openAiSetting: store.getProviderSetting('openai'),
+          ocrSetting,
+          imageRecords,
+          insertUsageLog: (payload) => store.insertUsageLog(payload),
+          subjectId: subject.id,
+          jobId: job.id,
+          onProgress: (progress) =>
+            store.updateGenerationJobProgress({
+              jobId: job.id,
+              ...progress,
+            }),
+        })
+        store.saveGenerationJobOcrText({
+          jobId: job.id,
+          ocrText,
+        })
+
+        const draftUnit = await draftGenerationService({
+          providerSetting,
+          subject,
+          ocrText,
+          subjectId: subject.id,
+          sourceImageIds: imageIds,
+          insertUsageLog: (payload) => store.insertUsageLog(payload),
+          jobId: job.id,
+          onProgress: (progress) =>
+            store.updateGenerationJobProgress({
+              jobId: job.id,
+              ...progress,
+            }),
+        })
+        const normalizedDraftUnit = {
+          ...draftUnit,
+          subjectId: subject.id,
+          sourceImageIds: imageIds,
+        }
+
+        store.insertUnit(normalizedDraftUnit)
+        store.completeGenerationJob({
+          jobId: job.id,
+          draftUnitId: normalizedDraftUnit.id,
+          ocrText,
+        })
+      } catch (error) {
+        store.failGenerationJob({
+          jobId: job.id,
+          errorMessage: error instanceof Error ? error.message : '生成失败',
+        })
+      }
+    })()
+  })
+
+  app.get('/api/generation-jobs/:id', authMiddleware(store), (req, res) => {
+    const job = store.getGenerationJob(req.params.id)
+    if (!job) {
+      res.status(404).json({ error: '生成任务不存在' })
+      return
     }
+
+    res.json(job)
+  })
+
+  app.post('/api/generation-jobs/:id/retry-draft', authMiddleware(store), (req, res) => {
+    const sourceJob = store.getGenerationJob(req.params.id)
+    if (!sourceJob) {
+      res.status(404).json({ error: '生成任务不存在' })
+      return
+    }
+
+    if (!sourceJob.hasOcrText) {
+      res.status(400).json({ error: '这条任务还没有可复用的 OCR 结果，暂时不能直接重试草稿。' })
+      return
+    }
+
+    const providerKey = sourceJob.provider === 'openai' ? 'openai' : sourceJob.provider === 'aliyun' ? 'qwen' : ''
+    const providerSetting = providerKey ? store.getProviderSetting(providerKey) : null
+    const subject = store.getSubject(sourceJob.subjectId)
+    if (!providerSetting || !subject) {
+      res.status(400).json({ error: '缺少草稿重试所需的模型配置或学科信息' })
+      return
+    }
+
+    const retryJob = store.createDraftRetryJob({
+      sourceJobId: sourceJob.id,
+      provider: sourceJob.provider,
+      model: providerSetting.model,
+    })
+    if (!retryJob) {
+      res.status(404).json({ error: '生成任务不存在' })
+      return
+    }
+
+    res.status(202).json(retryJob)
+
+    void (async () => {
+      try {
+        const cachedOcrText = store.getGenerationJobOcrText(sourceJob.id)
+        const draftUnit = await draftGenerationService({
+          providerSetting,
+          subject,
+          ocrText: cachedOcrText,
+          subjectId: sourceJob.subjectId,
+          sourceImageIds: sourceJob.imageIds,
+          insertUsageLog: (payload) => store.insertUsageLog(payload),
+          jobId: retryJob.id,
+          onProgress: (progress) =>
+            store.updateGenerationJobProgress({
+              jobId: retryJob.id,
+              ...progress,
+            }),
+        })
+        const normalizedDraftUnit = {
+          ...draftUnit,
+          subjectId: sourceJob.subjectId,
+          sourceImageIds: sourceJob.imageIds,
+        }
+
+        store.insertUnit(normalizedDraftUnit)
+        store.completeGenerationJob({
+          jobId: retryJob.id,
+          draftUnitId: normalizedDraftUnit.id,
+          ocrText: cachedOcrText,
+        })
+      } catch (error) {
+        store.failGenerationJob({
+          jobId: retryJob.id,
+          errorMessage: error instanceof Error ? error.message : '生成失败',
+        })
+      }
+    })()
   })
 
   app.get('/api/speaking/recordings', userAuthMiddleware(store), (req, res) => {
@@ -529,6 +641,7 @@ export const createApp = ({ rootDir = process.cwd(), services = {} } = {}) => {
         audioBuffer: fs.readFileSync(recordingFile.filePath),
         mimeType: recordingFile.mimeType || 'audio/webm',
         fileName: path.basename(recordingFile.filePath),
+        durationSeconds: recordingFile.durationSeconds || 0,
         targetTranscript: transcript,
         insertUsageLog: (payload) => store.insertUsageLog(payload),
       })
@@ -554,7 +667,30 @@ export const createApp = ({ rootDir = process.cwd(), services = {} } = {}) => {
     res.json(updated)
   })
 
-  app.post('/api/drafts/:id/publish', authMiddleware(store), (req, res) => {
+  app.post('/api/drafts/:id/publish', authMiddleware(store), async (req, res) => {
+    const draftUnit = store.findUnit(req.params.id)
+    if (!draftUnit) {
+      res.status(404).json({ error: '草稿不存在' })
+      return
+    }
+
+    try {
+      const projectSettings = store.getProjectSettings()
+      const preparedUnit = await unitAudioService({
+        activeAiVendor: projectSettings.activeAiVendor,
+        openAiSetting: store.getProviderSetting('openai'),
+        qwenSetting: store.getProviderSetting('qwen'),
+        audioAssetsDir: store.audioAssetsDir,
+        unit: draftUnit,
+        subjectId: draftUnit.subjectId,
+        insertUsageLog: (payload) => store.insertUsageLog(payload),
+      })
+      store.updateUnit(preparedUnit)
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : '发布前生成音频失败' })
+      return
+    }
+
     const unit = store.publishUnit(req.params.id)
     if (!unit) {
       res.status(404).json({ error: '草稿不存在' })

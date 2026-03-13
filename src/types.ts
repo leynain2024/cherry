@@ -67,6 +67,8 @@ export interface ListenChoiceActivity {
   kind: 'listen-choice'
   durationMinutes: number
   audioText: string
+  audioUrl?: string
+  audioMimeType?: string
   question: string
   options: ChoiceOption[]
   correctOptionId: string
@@ -80,6 +82,8 @@ export interface SpeakRepeatActivity {
   kind: 'speak-repeat'
   durationMinutes: number
   transcript: string
+  audioUrl?: string
+  audioMimeType?: string
   hint: string
   encouragement: string[]
 }
@@ -105,6 +109,8 @@ export interface WriteSpellActivity {
   kind: 'write-spell'
   durationMinutes: number
   sentence: string
+  audioUrl?: string
+  audioMimeType?: string
   answer: string
   tips: string[]
 }
@@ -172,6 +178,7 @@ export interface SubjectImage {
   fileName: string
   filePath: string
   uploadedAt: string
+  sortOrder?: number
   pageLabel?: string
   url?: string
 }
@@ -281,6 +288,7 @@ export type SpeakingPassScore = 60 | 65 | 70 | 75
 
 export interface PricingValues {
   inputPerMillion?: number
+  inputPerTenThousandChars?: number
   outputPerMillion?: number
   requestCost?: number
   perMinute?: number
@@ -289,6 +297,7 @@ export interface PricingValues {
 export interface ProviderPricing {
   text?: PricingValues
   speech?: PricingValues
+  tts?: PricingValues
   ocr?: PricingValues
 }
 
@@ -305,6 +314,11 @@ export interface ProviderSetting {
   temperature: number
   maxOutputTokens: number
   speechModel?: string
+  ttsModel?: string
+  ttsVoice?: string
+  ttsFormat?: string
+  ttsInstructions?: string
+  ttsLanguageType?: string
   ocrModel?: string
   accessKeyId?: string
   accessKeySecret?: string
@@ -334,6 +348,27 @@ export interface UsageLog {
   status: string
   jobId?: string
   details: Record<string, unknown>
+}
+
+export type GenerationJobStatus = 'running' | 'success' | 'failed'
+export type GenerationJobStage = 'queued' | 'ocr' | 'draft' | 'completed' | 'failed'
+
+export interface GenerationJob {
+  id: string
+  subjectId: string
+  imageIds: string[]
+  provider: string
+  model: string
+  status: GenerationJobStatus
+  stage: GenerationJobStage
+  processedImages: number
+  totalImages: number
+  message: string
+  hasOcrText: boolean
+  draftUnitId?: string
+  errorMessage?: string
+  createdAt: string
+  updatedAt: string
 }
 
 export interface SpeakingEvaluationResult {

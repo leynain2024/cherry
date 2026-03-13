@@ -21,10 +21,16 @@ export const defaultPricingSnapshots = {
       inputPerMillion: 1.25,
       outputPerMillion: 10,
     },
+    tts: {},
   },
   qwen: {
     text: {},
-    speech: {},
+    speech: {
+      perMinute: 0.0132,
+    },
+    tts: {
+      inputPerTenThousandChars: 0.8,
+    },
   },
   'aliyun-ocr': {
     ocr: {
@@ -35,13 +41,14 @@ export const defaultPricingSnapshots = {
 
 const normalizeValues = (raw = {}) => ({
   inputPerMillion: numberOrNull(raw.inputPerMillion),
+  inputPerTenThousandChars: numberOrNull(raw.inputPerTenThousandChars),
   outputPerMillion: numberOrNull(raw.outputPerMillion),
   requestCost: numberOrNull(raw.requestCost),
   perMinute: numberOrNull(raw.perMinute),
 })
 
 export const normalizePricing = (raw = {}) => {
-  if ('inputPerMillion' in raw || 'outputPerMillion' in raw || 'requestCost' in raw || 'perMinute' in raw) {
+  if ('inputPerMillion' in raw || 'inputPerTenThousandChars' in raw || 'outputPerMillion' in raw || 'requestCost' in raw || 'perMinute' in raw) {
     return {
       text: normalizeValues(raw),
     }
@@ -50,6 +57,7 @@ export const normalizePricing = (raw = {}) => {
   return {
     text: normalizeValues(raw.text),
     speech: normalizeValues(raw.speech),
+    tts: normalizeValues(raw.tts),
     ocr: normalizeValues(raw.ocr),
   }
 }
@@ -60,6 +68,10 @@ export const getCapabilityPricing = (provider, capability, overrides = {}) => {
   const merged = {
     inputPerMillion:
       normalizedOverrides.inputPerMillion != null ? normalizedOverrides.inputPerMillion : numberOrNull(snapshot.inputPerMillion),
+    inputPerTenThousandChars:
+      normalizedOverrides.inputPerTenThousandChars != null
+        ? normalizedOverrides.inputPerTenThousandChars
+        : numberOrNull(snapshot.inputPerTenThousandChars),
     outputPerMillion:
       normalizedOverrides.outputPerMillion != null
         ? normalizedOverrides.outputPerMillion
@@ -74,17 +86,26 @@ export const getCapabilityPricing = (provider, capability, overrides = {}) => {
 
 export const estimateUsageCost = (pricing, usage = {}) => {
   const inputTokens = Number(usage.inputTokens || 0)
+  const inputChars = Number(usage.inputChars || 0)
   const outputTokens = Number(usage.outputTokens || 0)
   const requestCount = Number(usage.requestCount || 0)
   const seconds = Number(usage.seconds || 0)
 
   const estimatedCost =
     (inputTokens / 1_000_000) * Number(pricing.inputPerMillion || 0) +
+    (inputChars / 10_000) * Number(pricing.inputPerTenThousandChars || 0) +
     (outputTokens / 1_000_000) * Number(pricing.outputPerMillion || 0) +
     requestCount * Number(pricing.requestCost || 0) +
     (seconds / 60) * Number(pricing.perMinute || 0)
 
-  if (!estimatedCost && !pricing.inputPerMillion && !pricing.outputPerMillion && !pricing.requestCost && !pricing.perMinute) {
+  if (
+    !estimatedCost &&
+    !pricing.inputPerMillion &&
+    !pricing.inputPerTenThousandChars &&
+    !pricing.outputPerMillion &&
+    !pricing.requestCost &&
+    !pricing.perMinute
+  ) {
     return null
   }
 

@@ -30,6 +30,7 @@ JSON 结构：
 2. 保留教材范围、主题和能力目标。
 3. vocabulary 至少 4 个词；patterns 至少 2 个句型；challenge 至少 2 题。
 4. 所有字段必须完整。
+5. 忽略图片里的手写批注、圈画、箭头、勾叉、铅笔涂改、课堂板书补充和非印刷体标记，不要把这些内容写入结果。
 
 教材提取文本如下：
 ${ocrText}`
@@ -67,12 +68,12 @@ const createClient = (setting) => {
     throw new Error('OpenAI API Key 未配置')
   }
 
-  const proxyAgent = getProxyAgent(setting.proxyUrl || '127.0.0.1:7892')
+  const proxyAgent = getProxyAgent(setting.proxyUrl)
 
   return new OpenAI({
     apiKey: setting.apiKey,
     baseURL: setting.baseUrl || 'https://api.openai.com/v1',
-    timeout: 30000,
+    timeout: 600000,
     maxRetries: 0,
     fetchOptions: proxyAgent
       ? {
@@ -92,7 +93,7 @@ const mapOpenAIError = (error) => {
   }
 
   if (error?.message === 'Request timed out.') {
-    return new Error('连接 OpenAI 超时，请检查当前网络是否能访问 api.openai.com')
+    return new Error('OpenAI 响应等待超时，请稍后重试')
   }
 
   if (error?.message?.includes?.('fetch failed')) {
@@ -135,6 +136,15 @@ const normalizeAudioUsage = (usage) => {
   }
 }
 
+const normalizeSpeechFormat = (format = '') => {
+  const normalized = String(format).trim().toLowerCase()
+  if (normalized === 'wav') {
+    return 'wav'
+  }
+
+  return 'mp3'
+}
+
 export const generateWithOpenAI = async ({ setting, ocrText, subjectName }) => {
   try {
     const client = createClient(setting)
@@ -174,7 +184,7 @@ export const extractTextWithOpenAI = async ({ setting, imageBuffer, mimeType = '
           content: [
             {
               type: 'input_text',
-              text: '你是教材 OCR 助手。请提取图片中的所有可见文字，只返回纯文本，不要解释。',
+              text: '你是教材 OCR 助手。请提取图片中的教材印刷文字，只返回纯文本，不要解释。忽略手写批注、圈画、箭头、勾叉、铅笔涂改、课堂补充和非印刷体标记。',
             },
           ],
         },
@@ -183,7 +193,7 @@ export const extractTextWithOpenAI = async ({ setting, imageBuffer, mimeType = '
           content: [
             {
               type: 'input_text',
-              text: '请完整提取这页教材里的所有英文、中文、标题与练习文字，按自然换行输出。',
+              text: '请完整提取这页教材里的印刷版英文、中文、标题与练习文字，按自然换行输出。忽略手写字、批改痕迹、圈点连线和随手涂画。',
             },
             {
               type: 'input_image',
@@ -220,6 +230,34 @@ export const transcribeWithOpenAI = async ({ setting, audioBuffer, fileName = 's
       text: response.text || '',
       usage: normalizeAudioUsage(response.usage),
       raw: response,
+    }
+  } catch (error) {
+    throw mapOpenAIError(error)
+  }
+}
+
+export const synthesizeWithOpenAI = async ({ setting, text }) => {
+  try {
+    const client = createClient(setting)
+    const format = normalizeSpeechFormat(setting.ttsFormat)
+    const response = await client.audio.speech.create({
+      model: setting.ttsModel || 'gpt-4o-mini-tts',
+      voice: setting.ttsVoice || 'alloy',
+      input: text,
+      response_format: format,
+      instructions: setting.ttsInstructions || undefined,
+    })
+
+    return {
+      audioBuffer: Buffer.from(await response.arrayBuffer()),
+      mimeType: format === 'wav' ? 'audio/wav' : 'audio/mpeg',
+      extension: format,
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        requestCount: 1,
+      },
     }
   } catch (error) {
     throw mapOpenAIError(error)

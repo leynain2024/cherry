@@ -26,7 +26,7 @@ const buildMessages = (ocrText, subjectName) => [
   }
 }
 
-要求：保留教材范围，但不要逐字复用教材原文；字段必须完整；词汇至少 4 个；句型至少 2 个；挑战题至少 2 题。
+要求：保留教材范围，但不要逐字复用教材原文；字段必须完整；词汇至少 4 个；句型至少 2 个；挑战题至少 2 题；忽略手写批注、圈画、箭头、勾叉、铅笔涂改、课堂补充和非印刷体标记，不要把这些内容写入结果。
 
 OCR 文本如下：
 ${ocrText}`,
@@ -63,8 +63,20 @@ const ensureApiKey = (setting) => {
   }
 }
 
-const getCompatibleEndpoint = (setting, path = '/compatible-mode/v1/chat/completions') =>
-  setting.endpoint || `${setting.baseUrl || 'https://dashscope.aliyuncs.com'}${path}`
+const getCompatibleEndpoint = (setting, path = '/compatible-mode/v1/chat/completions') => {
+  const endpoint = setting.endpoint || ''
+  if (endpoint) {
+    if (endpoint.includes('/compatible-mode/v1/')) {
+      return endpoint.replace(/\/compatible-mode\/v1\/.+$/, path)
+    }
+
+    if (/^https?:\/\//i.test(endpoint)) {
+      return `${endpoint.replace(/\/$/, '')}${path}`
+    }
+  }
+
+  return `${setting.baseUrl || 'https://dashscope.aliyuncs.com'}${path}`
+}
 
 const getNativeEndpoint = (setting) =>
   setting.endpoint || `${setting.baseUrl || 'https://dashscope.aliyuncs.com'}/api/v1/services/aigc/text-generation/generation`
@@ -221,5 +233,102 @@ export const transcribeWithQwen = async ({ setting, audioBuffer, mimeType }) => 
       seconds: 0,
     },
     raw: data,
+  }
+}
+
+const normalizeSpeechFormat = (format = '') => {
+  const normalized = String(format).trim().toLowerCase()
+  if (normalized === 'mp3') {
+    return 'mp3'
+  }
+
+  return 'wav'
+}
+
+const detectAudioMimeType = (format = '') => {
+  if (format === 'mp3') {
+    return 'audio/mpeg'
+  }
+
+  return 'audio/wav'
+}
+
+const readAudioBufferFromUrl = async (url) => {
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(`下载阿里语音文件失败：${response.status}`)
+  }
+
+  return Buffer.from(await response.arrayBuffer())
+}
+
+export const synthesizeWithQwen = async ({ setting, text }) => {
+  ensureApiKey(setting)
+
+  const format = normalizeSpeechFormat(setting.ttsFormat)
+  const response = await fetch(getCompatibleEndpoint(setting, '/compatible-mode/v1/audio/speech'), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${setting.apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: setting.ttsModel || 'qwen3-tts-flash',
+      input: text,
+      voice: setting.ttsVoice || 'Cherry',
+      response_format: format,
+      language_type: setting.ttsLanguageType || 'English',
+      instructions: setting.ttsInstructions || undefined,
+    }),
+  })
+
+  const contentType = response.headers.get('content-type') || ''
+  if (contentType.includes('application/json')) {
+    const data = await response.json()
+    if (!response.ok) {
+      throw new Error(getProviderErrorMessage(data, '通义语音合成调用失败'))
+    }
+
+    const audioUrl =
+      data?.audio?.url ||
+      data?.data?.[0]?.url ||
+      data?.output?.audio?.url ||
+      data?.output_audio?.url ||
+      ''
+    if (!audioUrl) {
+      throw new Error('通义语音合成返回中缺少音频地址')
+    }
+
+    return {
+      audioBuffer: await readAudioBufferFromUrl(audioUrl),
+      mimeType: detectAudioMimeType(format),
+      extension: format,
+      usage: {
+        inputTokens: Number(data?.usage?.input_tokens || 0),
+        inputChars: Number(data?.usage?.characters || text.length || 0),
+        outputTokens: Number(data?.usage?.output_tokens || 0),
+        totalTokens: Number(data?.usage?.total_tokens || 0),
+        requestCount: 1,
+      },
+      raw: data,
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(`通义语音合成调用失败：${response.status}`)
+  }
+
+  return {
+    audioBuffer: Buffer.from(await response.arrayBuffer()),
+    mimeType: detectAudioMimeType(format),
+    extension: format,
+    usage: {
+      inputTokens: 0,
+      inputChars: text.length || 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      requestCount: 1,
+    },
+    raw: null,
   }
 }
