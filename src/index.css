@@ -1,0 +1,47 @@
+:root {
+  font-family:
+    'Trebuchet MS',
+    'Arial Rounded MT Bold',
+    'PingFang SC',
+    'Hiragino Sans GB',
+    sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color: #173a5f;
+  background:
+    radial-gradient(circle at top, rgba(106, 194, 255, 0.45), transparent 32%),
+    linear-gradient(180deg, #f3fbff 0%, #dff2ff 100%);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+#root {
+  min-height: 100vh;
+}
