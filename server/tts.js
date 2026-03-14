@@ -1,42 +1,26 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { estimateUsageCost, getCapabilityPricing } from './pricing.js'
 import { synthesizeWithOpenAI } from './providers/openai-provider.js'
 import { synthesizeWithQwen } from './providers/qwen-provider.js'
 
-const buildAudioTasks = (unit) =>
-  unit.activities.flatMap((activity) => {
-    if (activity.kind === 'listen-choice' && activity.audioText?.trim()) {
-      return [{ activityId: activity.id, role: 'listen', text: activity.audioText.trim() }]
-    }
+const normalizeAudioPathPart = (value) => String(value || '').replace(/[^\w-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')
 
-    if (activity.kind === 'speak-repeat' && activity.transcript?.trim()) {
-      return [{ activityId: activity.id, role: 'speak', text: activity.transcript.trim() }]
-    }
-
-    if (activity.kind === 'write-spell' && activity.sentence?.trim()) {
-      return [{ activityId: activity.id, role: 'dictation', text: activity.sentence.trim() }]
-    }
-
-    return []
-  })
+const buildPublicAudioUrl = (fileName) => `/audio-assets/${fileName}`
 
 const hashAudioTask = ({ provider, model, voice, format, instructions, languageType, text }) =>
   createHash('sha256').update([provider, model, voice, format, instructions, languageType, text].join('::')).digest('hex').slice(0, 16)
 
-const normalizeAudioPathPart = (value) => String(value || '').replace(/[^\w-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')
-
-const getAudioFileName = ({ unitId, activityId, role, hash, extension }) =>
-  `${normalizeAudioPathPart(unitId)}-${normalizeAudioPathPart(activityId)}-${role}-${hash}.${extension}`
-
-const buildPublicAudioUrl = (fileName) => `/audio-assets/${fileName}`
+const getAudioFileName = ({ unitId, ownerId, role, hash, extension }) =>
+  `${normalizeAudioPathPart(unitId)}-${normalizeAudioPathPart(ownerId)}-${role}-${hash}.${extension}`
 
 const synthesizeByProvider = async ({ activeAiVendor, openAiSetting, qwenSetting, text }) => {
   if (activeAiVendor === 'openai') {
     if (!openAiSetting) {
       throw new Error('OpenAI 配置不存在，无法生成教学音频')
     }
+
     return synthesizeWithOpenAI({
       setting: openAiSetting,
       text,
@@ -58,6 +42,7 @@ const getTtsConfig = ({ activeAiVendor, openAiSetting, qwenSetting }) => {
     if (!openAiSetting) {
       throw new Error('OpenAI 配置不存在，无法生成教学音频')
     }
+
     return {
       provider: 'openai',
       model: openAiSetting.ttsModel || 'gpt-4o-mini-tts',
@@ -86,6 +71,51 @@ const getTtsConfig = ({ activeAiVendor, openAiSetting, qwenSetting }) => {
   }
 }
 
+const buildAudioTasks = (unit) => {
+  const tasks = []
+
+  unit.vocabularyBank.forEach((item) => {
+    if (item.audioText?.trim()) {
+      tasks.push({
+        ownerType: 'vocabulary',
+        ownerId: item.id,
+        role: 'vocab',
+        text: item.audioText.trim(),
+      })
+    }
+  })
+
+  unit.lessons.forEach((lesson) => {
+    lesson.activities.forEach((activity) => {
+      if ((activity.kind === 'listen-choice' || activity.kind === 'speak-repeat' || activity.kind === 'write-spell') && activity.audioText?.trim()) {
+        tasks.push({
+          ownerType: 'activity',
+          ownerId: activity.id,
+          role: activity.kind === 'listen-choice' ? 'listen' : activity.kind === 'speak-repeat' ? 'speak' : 'dictation',
+          text: activity.audioText.trim(),
+        })
+      }
+      if ((activity.kind === 'vocab-audio-write-en' || activity.kind === 'vocab-audio-choose-zh') && activity.audioText?.trim()) {
+        tasks.push({
+          ownerType: 'activity',
+          ownerId: activity.id,
+          role: 'vocab-audio',
+          text: activity.audioText.trim(),
+        })
+      }
+    })
+  })
+
+  return tasks
+}
+
+const attachAudioRef = (item, audio) => ({
+  ...item,
+  audioAssetId: audio.audioAssetId,
+  audioUrl: audio.audioUrl,
+  audioMimeType: audio.audioMimeType,
+})
+
 export const generateUnitAudioAssets = async ({
   activeAiVendor,
   openAiSetting,
@@ -101,7 +131,7 @@ export const generateUnitAudioAssets = async ({
   }
 
   const ttsConfig = getTtsConfig({ activeAiVendor, openAiSetting, qwenSetting })
-  const activityAudioMap = new Map()
+  const audioByOwnerId = new Map()
 
   for (const task of tasks) {
     const hash = hashAudioTask({
@@ -115,12 +145,13 @@ export const generateUnitAudioAssets = async ({
     })
     const fileName = getAudioFileName({
       unitId: unit.id,
-      activityId: task.activityId,
+      ownerId: task.ownerId,
       role: task.role,
       hash,
       extension: ttsConfig.format,
     })
     const filePath = path.join(audioAssetsDir, fileName)
+    const audioAssetId = `audio-${hash}-${randomUUID().slice(0, 8)}`
 
     if (!fs.existsSync(filePath)) {
       const result = await synthesizeByProvider({
@@ -145,7 +176,8 @@ export const generateUnitAudioAssets = async ({
         status: 'success',
         details: {
           unitId: unit.id,
-          activityId: task.activityId,
+          ownerType: task.ownerType,
+          ownerId: task.ownerId,
           role: task.role,
           voice: ttsConfig.voice,
           format: result.extension,
@@ -153,7 +185,8 @@ export const generateUnitAudioAssets = async ({
       })
     }
 
-    activityAudioMap.set(task.activityId, {
+    audioByOwnerId.set(task.ownerId, {
+      audioAssetId,
       audioUrl: buildPublicAudioUrl(fileName),
       audioMimeType: ttsConfig.format === 'wav' ? 'audio/wav' : 'audio/mpeg',
     })
@@ -161,17 +194,16 @@ export const generateUnitAudioAssets = async ({
 
   return {
     ...unit,
-    activities: unit.activities.map((activity) => {
-      const audio = activityAudioMap.get(activity.id)
-      if (!audio || (activity.kind !== 'listen-choice' && activity.kind !== 'speak-repeat' && activity.kind !== 'write-spell')) {
-        return activity
-      }
-
-      return {
-        ...activity,
-        audioUrl: audio.audioUrl,
-        audioMimeType: audio.audioMimeType,
-      }
+    vocabularyBank: unit.vocabularyBank.map((item) => {
+      const audio = audioByOwnerId.get(item.id)
+      return audio ? attachAudioRef(item, audio) : item
     }),
+    lessons: unit.lessons.map((lesson) => ({
+      ...lesson,
+      activities: lesson.activities.map((activity) => {
+        const audio = audioByOwnerId.get(activity.id)
+        return audio ? attachAudioRef(activity, audio) : activity
+      }),
+    })),
   }
 }

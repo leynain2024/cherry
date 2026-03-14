@@ -4,7 +4,7 @@ import express from 'express'
 import multer from 'multer'
 import { parse, serialize } from 'cookie'
 import { createDataStore } from './db.js'
-import { runDraftGeneration, runOcrForImages } from './generation.js'
+import { buildDraftUnitFromModel, parseJsonContent, runDraftGeneration, runOcrForImages } from './generation.js'
 import { evaluateSpeakingSubmission } from './speaking.js'
 import { generateUnitAudioAssets } from './tts.js'
 
@@ -442,12 +442,23 @@ export const createApp = ({ rootDir = process.cwd(), services = {} } = {}) => {
 
         const draftUnit = await draftGenerationService({
           providerSetting,
+          projectSettings,
           subject,
           ocrText,
           subjectId: subject.id,
           sourceImageIds: imageIds,
           insertUsageLog: (payload) => store.insertUsageLog(payload),
           jobId: job.id,
+          onModelResponse: ({ content }) =>
+            store.saveGenerationJobDraftResponse({
+              jobId: job.id,
+              responseText: content,
+            }),
+          onParsedPayload: (parsedPayload) =>
+            store.saveGenerationJobParsedPayload({
+              jobId: job.id,
+              parsedPayload,
+            }),
           onProgress: (progress) =>
             store.updateGenerationJobProgress({
               jobId: job.id,
@@ -519,21 +530,82 @@ export const createApp = ({ rootDir = process.cwd(), services = {} } = {}) => {
 
     void (async () => {
       try {
+        const projectSettings = store.getProjectSettings()
         const cachedOcrText = store.getGenerationJobOcrText(sourceJob.id)
-        const draftUnit = await draftGenerationService({
-          providerSetting,
-          subject,
-          ocrText: cachedOcrText,
-          subjectId: sourceJob.subjectId,
-          sourceImageIds: sourceJob.imageIds,
-          insertUsageLog: (payload) => store.insertUsageLog(payload),
-          jobId: retryJob.id,
-          onProgress: (progress) =>
-            store.updateGenerationJobProgress({
-              jobId: retryJob.id,
-              ...progress,
-            }),
-        })
+        const cachedParsedPayload = store.getGenerationJobParsedPayload(sourceJob.id)
+        const cachedDraftResponse = store.getGenerationJobDraftResponse(sourceJob.id)
+        let draftUnit
+
+        if (cachedParsedPayload) {
+          store.updateGenerationJobProgress({
+            jobId: retryJob.id,
+            stage: 'draft',
+            processedImages: retryJob.totalImages,
+            totalImages: retryJob.totalImages,
+            message: '正在基于已缓存的结构化结果重建单元草稿。',
+          })
+          store.saveGenerationJobParsedPayload({
+            jobId: retryJob.id,
+            parsedPayload: cachedParsedPayload,
+          })
+          draftUnit = buildDraftUnitFromModel({
+            subjectId: sourceJob.subjectId,
+            subjectName: subject.name,
+            sourceImageIds: sourceJob.imageIds,
+            parsed: cachedParsedPayload,
+            projectSettings,
+          })
+        } else if (cachedDraftResponse) {
+          store.updateGenerationJobProgress({
+            jobId: retryJob.id,
+            stage: 'draft',
+            processedImages: retryJob.totalImages,
+            totalImages: retryJob.totalImages,
+            message: '正在基于已缓存的模型返回结果重试草稿整理。',
+          })
+          store.saveGenerationJobDraftResponse({
+            jobId: retryJob.id,
+            responseText: cachedDraftResponse,
+          })
+          const parsedPayload = parseJsonContent(cachedDraftResponse)
+          store.saveGenerationJobParsedPayload({
+            jobId: retryJob.id,
+            parsedPayload,
+          })
+          draftUnit = buildDraftUnitFromModel({
+            subjectId: sourceJob.subjectId,
+            subjectName: subject.name,
+            sourceImageIds: sourceJob.imageIds,
+            parsed: parsedPayload,
+            projectSettings,
+          })
+        } else {
+          draftUnit = await draftGenerationService({
+            providerSetting,
+            projectSettings,
+            subject,
+            ocrText: cachedOcrText,
+            subjectId: sourceJob.subjectId,
+            sourceImageIds: sourceJob.imageIds,
+            insertUsageLog: (payload) => store.insertUsageLog(payload),
+            jobId: retryJob.id,
+            onModelResponse: ({ content }) =>
+              store.saveGenerationJobDraftResponse({
+                jobId: retryJob.id,
+                responseText: content,
+              }),
+            onParsedPayload: (parsedPayload) =>
+              store.saveGenerationJobParsedPayload({
+                jobId: retryJob.id,
+                parsedPayload,
+              }),
+            onProgress: (progress) =>
+              store.updateGenerationJobProgress({
+                jobId: retryJob.id,
+                ...progress,
+              }),
+          })
+        }
         const normalizedDraftUnit = {
           ...draftUnit,
           subjectId: sourceJob.subjectId,

@@ -2,7 +2,7 @@ import OpenAI, { toFile } from 'openai'
 import { ProxyAgent } from 'undici'
 
 const buildPrompt = (ocrText, subjectName) => `你是小学英语课程整理助手。
-请基于下面的教材提取文本，为学科“${subjectName}”生成一个网站单元草稿。
+请基于下面的教材提取文本，为学科“${subjectName}”生成一个完整教材内容清单。
 必须输出严格 JSON，不要输出 markdown。
 
 JSON 结构：
@@ -13,24 +13,46 @@ JSON 结构：
   "difficulty": "Starter|Bridge|Explorer",
   "coverEmoji": "一个 emoji",
   "themeColor": "#48a8f6",
-  "vocabulary": [{"word":"","phonetic":"","meaning":"","imageLabel":"","example":""}],
-  "patterns": [{"sentence":"","slots":[""],"demoLine":""}],
-  "reading": {"title":"","content":"","audioText":"","question":""},
-  "activities": {
-    "listen": {"title":"","prompt":"","audioText":"","question":"","options":[{"id":"a","label":"","emoji":"🎯"}],"correctOptionId":"a"},
-    "speak": {"title":"","prompt":"","transcript":"","hint":"","encouragement":["","",""]},
-    "read": {"title":"","prompt":"","passage":"","question":"","options":[{"id":"a","label":"","emoji":"📘"}],"correctOptionId":"a"},
-    "write": {"title":"","prompt":"","sentence":"","answer":"","tips":["",""]},
-    "challenge": {"title":"","prompt":"","questions":[{"prompt":"","options":[{"id":"a","label":""}],"correctOptionId":"a"}]}
-  }
+  "vocabularyBank": [{"word":"","phonetic":"","meaning":"","imageLabel":"","example":"","sourceLessonLabel":"","sourcePageIds":["01.jpg"],"isCore":true}],
+  "patterns": [{"sentence":"","slots":[""],"demoLine":"","sourceLessonLabel":"","sourcePageIds":["01.jpg"]}],
+  "contentInventory": [
+    {
+      "sequence": 1,
+      "sourceLessonLabel": "LESSON 1",
+      "sourceSectionLabel": "Guided Conversation",
+      "contentType": "dialogue|listening|speaking|reading|writing|pronunciation|pattern|assessment|vocabulary",
+      "title": "",
+      "skill": "listen|speak|read|write",
+      "estimatedMinutes": 2,
+      "sourcePageIds": ["04.jpg"],
+      "vocabularyIds": [],
+      "content": {
+        "prompt": "",
+        "audioText": "",
+        "transcript": "",
+        "passage": "",
+        "sentence": "",
+        "answer": "",
+        "question": "",
+        "options": [{"id":"a","label":"","emoji":"⭐"}],
+        "correctOptionId": "a",
+        "tips": [""],
+        "questions": [{"prompt":"","options":[{"id":"a","label":""}],"correctOptionId":"a"}],
+        "vocabularyWords": [""]
+      }
+    }
+  ]
 }
 
 要求：
-1. 不要逐字复用教材原文，输出适合儿童网站的整理稿。
-2. 保留教材范围、主题和能力目标。
-3. vocabulary 至少 4 个词；patterns 至少 2 个句型；challenge 至少 2 题。
-4. 所有字段必须完整。
-5. 忽略图片里的手写批注、圈画、箭头、勾叉、铅笔涂改、课堂板书补充和非印刷体标记，不要把这些内容写入结果。
+1. 先完整提取教材全部教学内容，不要为了压缩时长省略内容。
+2. 必须覆盖每个教材板块，包括词汇、对话、数字、听力、口语、阅读、书写、句型、练习和测验。
+3. 同一页里如果有多个板块，必须拆成多个 contentInventory 条目。
+4. 允许引用教材原文，重点是完整、准确、可结构化，不要改写掉关键信息。
+5. vocabularyBank 要尽可能完整，不能只保留少量代表词。
+6. 像第 04 页的 Guided Conversation 和 Numbers 1-12 这类内容，必须分别进入 contentInventory。
+7. 所有字段必须完整；没有的字段填空字符串、空数组或合理默认值。
+8. 忽略图片里的手写批注、圈画、箭头、勾叉、铅笔涂改、课堂板书补充和非印刷体标记，不要把这些内容写入结果。
 
 教材提取文本如下：
 ${ocrText}`
@@ -145,13 +167,16 @@ const normalizeSpeechFormat = (format = '') => {
   return 'mp3'
 }
 
+const minimumDraftMaxOutputTokens = 8192
+
 export const generateWithOpenAI = async ({ setting, ocrText, subjectName }) => {
   try {
     const client = createClient(setting)
+    const maxOutputTokens = Math.max(Number(setting.maxOutputTokens) || 0, minimumDraftMaxOutputTokens)
     const response = await client.responses.create({
       model: setting.model || 'gpt-5.2',
       reasoning: setting.reasoningEffort ? { effort: setting.reasoningEffort } : undefined,
-      max_output_tokens: setting.maxOutputTokens || 2048,
+      max_output_tokens: maxOutputTokens,
       input: buildPrompt(ocrText, subjectName),
       text: {
         format: {

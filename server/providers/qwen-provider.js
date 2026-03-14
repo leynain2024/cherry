@@ -2,11 +2,11 @@ const buildMessages = (ocrText, subjectName) => [
   {
     role: 'system',
     content:
-      '你是小学英语课程整理助手。请把 OCR 文本整理成适合儿童网站使用的结构化单元草稿，只输出 JSON。',
+      '你是小学英语课程整理助手。请把 OCR 文本整理成完整教材内容清单，只输出 JSON。',
   },
   {
     role: 'user',
-    content: `请为学科“${subjectName}”生成一个网站单元草稿，字段要求如下：
+    content: `请为学科“${subjectName}”生成一个完整教材内容清单，字段要求如下：
 {
   "title": "Unit ...",
   "stage": "阶段...",
@@ -14,19 +14,38 @@ const buildMessages = (ocrText, subjectName) => [
   "difficulty": "Starter|Bridge|Explorer",
   "coverEmoji": "一个 emoji",
   "themeColor": "#48a8f6",
-  "vocabulary": [{"word":"","phonetic":"","meaning":"","imageLabel":"","example":""}],
-  "patterns": [{"sentence":"","slots":[""],"demoLine":""}],
-  "reading": {"title":"","content":"","audioText":"","question":""},
-  "activities": {
-    "listen": {"title":"","prompt":"","audioText":"","question":"","options":[{"id":"a","label":"","emoji":"🎯"}],"correctOptionId":"a"},
-    "speak": {"title":"","prompt":"","transcript":"","hint":"","encouragement":["","",""]},
-    "read": {"title":"","prompt":"","passage":"","question":"","options":[{"id":"a","label":"","emoji":"📘"}],"correctOptionId":"a"},
-    "write": {"title":"","prompt":"","sentence":"","answer":"","tips":["",""]},
-    "challenge": {"title":"","prompt":"","questions":[{"prompt":"","options":[{"id":"a","label":""}],"correctOptionId":"a"}]}
-  }
+  "vocabularyBank": [{"word":"","phonetic":"","meaning":"","imageLabel":"","example":"","sourceLessonLabel":"","sourcePageIds":["01.jpg"],"isCore":true}],
+  "patterns": [{"sentence":"","slots":[""],"demoLine":"","sourceLessonLabel":"","sourcePageIds":["01.jpg"]}],
+  "contentInventory": [
+    {
+      "sequence": 1,
+      "sourceLessonLabel": "LESSON 1",
+      "sourceSectionLabel": "Guided Conversation",
+      "contentType": "dialogue|listening|speaking|reading|writing|pronunciation|pattern|assessment|vocabulary",
+      "title": "",
+      "skill": "listen|speak|read|write",
+      "estimatedMinutes": 2,
+      "sourcePageIds": ["04.jpg"],
+      "vocabularyIds": [],
+      "content": {
+        "prompt": "",
+        "audioText": "",
+        "transcript": "",
+        "passage": "",
+        "sentence": "",
+        "answer": "",
+        "question": "",
+        "options": [{"id":"a","label":"","emoji":"⭐"}],
+        "correctOptionId": "a",
+        "tips": [""],
+        "questions": [{"prompt":"","options":[{"id":"a","label":""}],"correctOptionId":"a"}],
+        "vocabularyWords": [""]
+      }
+    }
+  ]
 }
 
-要求：保留教材范围，但不要逐字复用教材原文；字段必须完整；词汇至少 4 个；句型至少 2 个；挑战题至少 2 题；忽略手写批注、圈画、箭头、勾叉、铅笔涂改、课堂补充和非印刷体标记，不要把这些内容写入结果。
+要求：先完整提取教材全部教学内容，不要为了压缩时长省略内容；必须覆盖每个教材板块，包括词汇、对话、数字、听力、口语、阅读、书写、句型、练习和测验；同一页里如果有多个板块，必须拆成多个 contentInventory 条目；允许引用教材原文，重点是完整准确；vocabularyBank 要尽可能完整；像第 04 页的 Guided Conversation 和 Numbers 1-12 必须分别进入 contentInventory；所有字段必须完整；忽略手写批注、圈画、箭头、勾叉、铅笔涂改、课堂补充和非印刷体标记，不要把这些内容写入结果。
 
 OCR 文本如下：
 ${ocrText}`,

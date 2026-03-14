@@ -378,6 +378,69 @@ describe('server app', () => {
     expect(draftCallCount).toBe(2)
   })
 
+  it('retries from cached model output without calling the draft model again', async () => {
+    let draftCallCount = 0
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'haibao-retry-cached-response-'))
+    tempDirs.push(dir)
+    const app = createApp({
+      rootDir: dir,
+      services: {
+        runOcrForImages: async () => 'OCR text from cache',
+        runDraftGeneration: async ({ onModelResponse }) => {
+          draftCallCount += 1
+          await onModelResponse?.({
+            content: JSON.stringify({
+              title: 'Cached Draft',
+              stage: 'Stage',
+              goal: 'Goal',
+              difficulty: 'Starter',
+              coverEmoji: '📘',
+              themeColor: '#48a8f6',
+              vocabularyBank: [],
+              patterns: [],
+              contentInventory: [],
+            }),
+            usage: {
+              inputTokens: 100,
+              outputTokens: 120,
+              totalTokens: 220,
+            },
+          })
+          throw new Error('模型未返回可解析 JSON')
+        },
+      },
+    })
+
+    const { adminCookie, subjectId } = await bootstrapAdminAndUser(app)
+
+    const upload = await request(app)
+      .post(`/api/subjects/${subjectId}/images`)
+      .set('Cookie', adminCookie)
+      .attach('images', Buffer.from('a'), { filename: 'page-1.png', contentType: 'image/png' })
+    expect(upload.statusCode).toBe(201)
+
+    const generate = await request(app)
+      .post(`/api/subjects/${subjectId}/generate-unit-draft`)
+      .set('Cookie', adminCookie)
+      .send({ imageIds: [upload.body[0].id] })
+    expect(generate.statusCode).toBe(202)
+
+    const failedJob = await waitForGenerationJob(app, adminCookie, generate.body.id)
+    expect(failedJob.body.status).toBe('failed')
+    expect(failedJob.body.hasDraftResponse).toBe(true)
+    expect(draftCallCount).toBe(1)
+
+    const retry = await request(app).post(`/api/generation-jobs/${failedJob.body.id}/retry-draft`).set('Cookie', adminCookie)
+    expect(retry.statusCode).toBe(202)
+
+    const retriedJob = await waitForGenerationJob(app, adminCookie, retry.body.id)
+    expect(retriedJob.body.status).toBe('success')
+    expect(retriedJob.body.hasDraftResponse).toBe(true)
+    expect(retriedJob.body.hasParsedPayload).toBe(true)
+    expect(retriedJob.body.draftUnitId).toBeTruthy()
+    expect(draftCallCount).toBe(1)
+  })
+
   it('requires a user session for app data', async () => {
     const app = makeApp()
     const response = await request(app).get('/api/app-data')

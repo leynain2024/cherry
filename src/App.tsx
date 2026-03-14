@@ -44,6 +44,7 @@ import {
   summarizeWeakPoints,
   syncProgressDerivedState,
 } from './learning-progress'
+import { getActivityProgressKey } from './unit-helpers'
 import type {
   Activity,
   AiVendor,
@@ -91,6 +92,30 @@ const skillLabels = {
   read: '读',
   write: '写',
 } as const
+
+const defaultProjectSettings: ProjectSettings = {
+  activeAiVendor: 'openai',
+  speakingPassScore: 60,
+  dailyLessonMinMinutes: 15,
+  dailyLessonMaxMinutes: 15,
+}
+
+const findStoredActivityResult = (
+  activityResults: StudentProgress['activityResults'],
+  unitId: string,
+  activityId: string,
+  lessonId = '',
+) => {
+  if (lessonId) {
+    return activityResults[getActivityProgressKey(unitId, lessonId, activityId)] || activityResults[`${unitId}:${activityId}`] || null
+  }
+
+  return (
+    activityResults[`${unitId}:${activityId}`] ||
+    Object.entries(activityResults).find(([key]) => key.startsWith(`${unitId}:`) && key.endsWith(`:${activityId}`))?.[1] ||
+    null
+  )
+}
 
 const vocabularyEmojiPairs = [
   { keyword: '挥手', emoji: '👋' },
@@ -339,7 +364,7 @@ const normalizeOpenAIProviderForm = (form: ProviderSetting): ProviderSetting => 
   proxyUrl: typeof form.proxyUrl === 'string' ? form.proxyUrl.trim() : defaultOpenAiProxyUrl,
   reasoningEffort: openAiReasoningOptions.some((option) => option.value === form.reasoningEffort) ? form.reasoningEffort : 'high',
   verbosity: openAiVerbosityOptions.some((option) => option.value === form.verbosity) ? form.verbosity : 'medium',
-  maxOutputTokens: openAiMaxOutputTokenOptions.some((value) => value === form.maxOutputTokens) ? form.maxOutputTokens : 2048,
+  maxOutputTokens: openAiMaxOutputTokenOptions.some((value) => value === form.maxOutputTokens) ? form.maxOutputTokens : 8192,
   speechModel: openAiSpeechModelOptions.some((option) => option.value === form.speechModel) ? form.speechModel : 'gpt-4o-mini-transcribe',
   ttsModel: openAiTtsModelOptions.some((option) => option.value === form.ttsModel) ? form.ttsModel : 'gpt-4o-mini-tts',
   ttsVoice: openAiTtsVoiceOptions.some((option) => option.value === form.ttsVoice) ? form.ttsVoice : 'alloy',
@@ -596,12 +621,13 @@ function App() {
   const [adminState, setAdminState] = useState<AdminState>({
     subjects: [],
     drafts: [],
-    projectSettings: { activeAiVendor: 'openai', speakingPassScore: 60 },
+    generationJobs: [],
+    projectSettings: defaultProjectSettings,
     providerSettings: [],
     usageLogs: [],
     users: [],
   })
-  const [projectSettings, setProjectSettings] = useState<ProjectSettings>({ activeAiVendor: 'openai', speakingPassScore: 60 })
+  const [projectSettings, setProjectSettings] = useState<ProjectSettings>(defaultProjectSettings)
   const [view, setView] = useState<ViewName>('login')
   const [adminTab, setAdminTab] = useState<AdminTab>('subjects')
   const [activeUnitId, setActiveUnitId] = useState('')
@@ -676,10 +702,13 @@ function App() {
   const rewardHideTimerRef = useRef<number | null>(null)
   const rewardStartTimerRef = useRef<number | null>(null)
   const lessonAudioRef = useRef<HTMLAudioElement | null>(null)
+  const hydratedProgressRef = useRef<StudentProgress | null>(null)
+  const generationPollJobIdRef = useRef('')
 
   const publishedUnits = units.filter((unit) => unit.status === 'published')
   const activeUnit = publishedUnits.find((unit) => unit.id === activeUnitId) ?? publishedUnits[0]
-  const activeActivity = activeUnit?.activities[activeActivityIndex]
+  const activeUnitActivities = activeUnit?.activities || []
+  const activeActivity = activeUnitActivities[activeActivityIndex]
   const currentSubject = subjects.find((subject) => subject.id === selectedSubjectId) || subjects[0]
   const currentAdminSubject =
     adminState.subjects.find((subject) => subject.id === selectedSubjectId) || adminState.subjects[0]
@@ -695,6 +724,15 @@ function App() {
   const allAdminImagesSelected = Boolean(sortedAdminImages.length) && selectedImageIds.length === sortedAdminImages.length
   const selectedDraft =
     adminState.drafts.find((draft) => draft.id === selectedDraftId) || adminState.drafts[0] || null
+  const selectedDraftActivities = selectedDraft?.activities || []
+  const selectedDraftVocabulary = selectedDraft?.vocabulary || selectedDraft?.vocabularyBank || []
+  const selectedDraftReading = selectedDraft?.reading || {
+    id: '',
+    title: '',
+    content: '',
+    audioText: '',
+    question: '',
+  }
   const draftGenerationSubjectName =
     adminState.subjects.find((subject) => subject.id === draftGenerationJob?.subjectId)?.name || currentAdminSubjectName
   const filteredUsers = adminState.users.filter((user) => user.username.toLowerCase().includes(userSearch.trim().toLowerCase()))
@@ -703,14 +741,28 @@ function App() {
   const activeSubjects = adminState.subjects.filter((subject) => subject.status === 'active')
   const activeAiVendor = projectSettings.activeAiVendor
   const speakingPassScore = projectSettings.speakingPassScore
-  const todayStudySummary = getTodayStudySummary(progress, speakingPassScore)
+  const latestGenerationJobForSubject =
+    adminState.generationJobs.find((job) => job.subjectId === selectedSubjectId) || null
+  const todayStudySummary = getTodayStudySummary(
+    {
+      ...progress,
+      dailyStats:
+        Object.keys(progress.dailyStats || {}).length > 0
+          ? progress.dailyStats
+          : hydratedProgressRef.current?.dailyStats || progress.dailyStats,
+    },
+    speakingPassScore,
+  )
   const perfectUnitIds = getPerfectUnitIds(progress.activityResults, publishedUnits, speakingPassScore)
   const perfectUnitIdSet = new Set(perfectUnitIds)
   const openAiForm = providerForms.openai
   const qwenForm = providerForms.qwen
   const aliyunOcrForm = providerForms['aliyun-ocr']
   const recommendation = getRecommendation(progress, publishedUnits, speakingPassScore)
-  const activeActivityResult = activeUnit && activeActivity ? progress.activityResults[`${activeUnit.id}:${activeActivity.id}`] : null
+  const activeActivityResult =
+    activeUnit && activeActivity
+      ? findStoredActivityResult(progress.activityResults, activeUnit.id, activeActivity.id, activeActivity.lessonId || '')
+      : null
   const activeActivityStars =
     activeUnit && activeActivity ? getActivityStars(progress.activityResults, activeUnit.id, activeActivity.id, speakingPassScore) : 0
   const activeActivityLocked = activeActivityStars === 3
@@ -718,11 +770,21 @@ function App() {
   const activeActivityReadOnly = activeChallengeLocked || activeActivityLocked
 
   const hydrateAppData = useCallback((appData: AppData & { bootstrapped?: boolean }) => {
+    hydratedProgressRef.current = appData.progress
     setBootstrapped(Boolean(appData.bootstrapped))
     setSubjects(appData.subjects || [])
     setUnits(appData.units)
-    setProjectSettings(appData.projectSettings || { activeAiVendor: 'openai', speakingPassScore: 60 })
-    setProgress(appData.progress)
+    setProjectSettings(appData.projectSettings || defaultProjectSettings)
+    setProgress(
+      syncProgressDerivedState(
+        {
+          ...createDefaultProgress(appData.units || []),
+          ...appData.progress,
+        },
+        appData.units || [],
+        appData.projectSettings?.speakingPassScore || defaultProjectSettings.speakingPassScore,
+      ),
+    )
     setProgressReady(true)
     setActiveUnitId(appData.progress.currentUnitId || appData.units[0]?.id || '')
     if (appData.currentUser) {
@@ -743,7 +805,10 @@ function App() {
 
   const refreshAdminState = useCallback(async () => {
     const state = await getAdminState()
-    setAdminState(state)
+    setAdminState({
+      ...state,
+      generationJobs: state.generationJobs || [],
+    })
     setProjectSettings(state.projectSettings)
     if (!selectedSubjectId && state.subjects[0]) {
       setSelectedSubjectId(state.subjects[0].id)
@@ -790,6 +855,57 @@ function App() {
 
     refreshAdminState()
   }, [adminSession.authenticated, refreshAdminState])
+
+  useEffect(() => {
+    if (!adminSession.authenticated || !selectedSubjectId) {
+      return
+    }
+
+    if (!latestGenerationJobForSubject) {
+      if (!draftGenerationJob || draftGenerationJob.subjectId === selectedSubjectId) {
+        setDraftGenerationJob(null)
+      }
+      return
+    }
+
+    setDraftGenerationJob((current) => {
+      if (
+        current?.id === latestGenerationJobForSubject.id &&
+        current.updatedAt === latestGenerationJobForSubject.updatedAt &&
+        current.status === latestGenerationJobForSubject.status
+      ) {
+        return current
+      }
+      return latestGenerationJobForSubject
+    })
+
+    if (latestGenerationJobForSubject.status !== 'running' || generationPollJobIdRef.current === latestGenerationJobForSubject.id) {
+      return
+    }
+
+    generationPollJobIdRef.current = latestGenerationJobForSubject.id
+    void waitForGenerationJob(latestGenerationJobForSubject.id)
+      .then(async (finishedJob) => {
+        await refreshAdminState()
+        await refreshPublicData()
+        if (finishedJob.draftUnitId) {
+          setSelectedDraftId(finishedJob.draftUnitId)
+        }
+      })
+      .catch((error) => {
+        setErrorMessage(error instanceof Error ? error.message : '草稿生成失败')
+      })
+      .finally(() => {
+        generationPollJobIdRef.current = ''
+      })
+  }, [
+    adminSession.authenticated,
+    draftGenerationJob,
+    latestGenerationJobForSubject,
+    refreshAdminState,
+    refreshPublicData,
+    selectedSubjectId,
+  ])
 
   useEffect(() => {
     if (publishedUnits.length && !publishedUnits.find((unit) => unit.id === activeUnitId)) {
@@ -1353,7 +1469,7 @@ function App() {
   }
 
   const getCompletedActivityCount = (unit: Unit) =>
-    unit.activities.filter((activity) => progress.activityResults[`${unit.id}:${activity.id}`]?.completed).length
+    (unit.activities || []).filter((activity) => findStoredActivityResult(progress.activityResults, unit.id, activity.id, activity.lessonId || '')?.completed).length
 
   const getActivityStarCount = (unitId: string, activityId: string) => {
     return getActivityStars(progress.activityResults, unitId, activityId, speakingPassScore)
@@ -1400,7 +1516,7 @@ function App() {
       durationSeconds,
       speakingPassScore,
     )
-    const mergedResult = nextProgress.activityResults[`${activeUnit.id}:${activeActivity.id}`]
+    const mergedResult = findStoredActivityResult(nextProgress.activityResults, activeUnit.id, activeActivity.id, activeActivity.lessonId || '')
     const starGain = Math.max(0, nextProgress.totalStars - progress.totalStars)
     setProgress(nextProgress)
     void persistProgressToServer(nextProgress)
@@ -1450,10 +1566,25 @@ function App() {
       )
       return
     }
+    if (activeActivity.kind === 'vocab-cn-write-en' || activeActivity.kind === 'vocab-audio-write-en') {
+      if (!textAnswer.trim()) return
+      const correct = textAnswer.trim().toLowerCase() === activeActivity.answer.toLowerCase()
+      submitResult(
+        correct ? 100 : 0,
+        correct ? [] : [`拼写：${activeActivity.answer}`],
+        correct ? '单词拼写正确。' : `再检查一下，正确答案是 ${activeActivity.answer}。`,
+        { feedbackTone: correct ? 'success' : 'error' },
+      )
+      return
+    }
   }
 
   const handleChoiceSelect = async (optionId: string) => {
-    if (!activeActivity || activeActivityLocked || (activeActivity.kind !== 'listen-choice' && activeActivity.kind !== 'read-choice')) {
+    if (
+      !activeActivity ||
+      activeActivityLocked ||
+      !['listen-choice', 'read-choice', 'vocab-en-choose-zh', 'vocab-audio-choose-zh'].includes(activeActivity.kind)
+    ) {
       return
     }
     if (submission.status === 'done') {
@@ -1462,7 +1593,11 @@ function App() {
 
     await prewarmFeedbackAudio()
     setChoiceAnswer(optionId)
-    const correct = optionId === activeActivity.correctOptionId
+    const choiceActivity = activeActivity as Extract<
+      Activity,
+      { kind: 'listen-choice' | 'read-choice' | 'vocab-en-choose-zh' | 'vocab-audio-choose-zh' }
+    >
+    const correct = optionId === choiceActivity.correctOptionId
     if (!correct) {
       setWrongChoiceAnswer(optionId)
       setChoiceWrongAttempts((current) => current + 1)
@@ -1475,8 +1610,10 @@ function App() {
     const score = getChoiceScoreFromWrongAttempts(wrongAttempts)
     submitResult(
       score,
-      wrongAttempts > 0 ? [`${activeActivity.kind === 'listen-choice' ? '听力选择' : '阅读理解'}：${activeActivity.question}`] : [],
-      wrongAttempts > 0 ? '答对了，再接再厉。' : '回答正确，耳朵真灵。',
+      wrongAttempts > 0
+        ? [`${choiceActivity.kind === 'listen-choice' || choiceActivity.kind === 'vocab-audio-choose-zh' ? '听力选择' : '阅读理解'}：${choiceActivity.question}`]
+        : [],
+      wrongAttempts > 0 ? '答对了，再接再厉。' : '回答正确，继续保持。',
       { feedbackTone: 'success' },
     )
   }
@@ -1691,7 +1828,7 @@ function App() {
 
   const goToNextActivity = () => {
     if (!activeUnit) return
-    if (activeActivityIndex >= activeUnit.activities.length - 1) {
+    if (activeActivityIndex >= activeUnitActivities.length - 1) {
       setView('home')
       resetTransientState()
       return
@@ -2035,14 +2172,40 @@ function App() {
     }))
   }
 
-  const updateDraftReading = (patch: Partial<Unit['reading']>) => {
+  const updateDraftReading = (patch: Partial<NonNullable<Unit['reading']>>) => {
     if (!selectedDraft) {
       return
     }
 
+    const nextLessons = selectedDraft.lessons.map((lesson, lessonIndex) => {
+      const readIndex = lesson.activities.findIndex((activity) => activity.kind === 'read-choice')
+      if (readIndex < 0 && lessonIndex !== 0) {
+        return lesson
+      }
+      if (readIndex < 0) {
+        return lesson
+      }
+
+      return {
+        ...lesson,
+        activities: lesson.activities.map((activity, activityIndex) =>
+          activityIndex === readIndex && activity.kind === 'read-choice'
+            ? {
+                ...activity,
+                title: patch.title ?? activity.title,
+                passage: patch.content ?? activity.passage,
+                audioText: patch.audioText ?? activity.audioText,
+                question: patch.question ?? activity.question,
+              }
+            : activity,
+        ),
+      }
+    })
+
     updateDraftField({
+      lessons: nextLessons,
       reading: {
-        ...selectedDraft.reading,
+        ...selectedDraftReading,
         ...patch,
       },
     })
@@ -2054,7 +2217,11 @@ function App() {
     }
 
     updateDraftField({
-      activities: selectedDraft.activities.map((activity) => (activity.id === activityId ? { ...activity, ...patch } : activity)) as Activity[],
+      activities: selectedDraftActivities.map((activity) => (activity.id === activityId ? { ...activity, ...patch } : activity)) as Activity[],
+      lessons: selectedDraft.lessons.map((lesson) => ({
+        ...lesson,
+        activities: lesson.activities.map((activity) => (activity.id === activityId ? { ...activity, ...patch } : activity)) as Activity[],
+      })),
     })
   }
 
@@ -2077,7 +2244,13 @@ function App() {
     }, [])
 
   const getActivityAudioHint = (activity: Activity) => {
-    if (activity.kind !== 'listen-choice' && activity.kind !== 'speak-repeat' && activity.kind !== 'write-spell') {
+    if (
+      activity.kind !== 'listen-choice' &&
+      activity.kind !== 'speak-repeat' &&
+      activity.kind !== 'write-spell' &&
+      activity.kind !== 'vocab-audio-write-en' &&
+      activity.kind !== 'vocab-audio-choose-zh'
+    ) {
       return null
     }
 
@@ -2157,6 +2330,72 @@ function App() {
               </button>
             ))}
           </div>
+        </div>
+      )
+    }
+
+    if (activity.kind === 'vocab-en-choose-zh' || activity.kind === 'vocab-audio-choose-zh') {
+      const displayedChoiceAnswer = activeActivityLocked ? activity.correctOptionId : choiceAnswer
+      const audioHint = activity.kind === 'vocab-audio-choose-zh' ? getActivityAudioHint(activity) : null
+      return (
+        <div className="activity-block">
+          <article className="writing-card">
+            <p className="sentence-line">{activity.kind === 'vocab-en-choose-zh' ? activity.word : '听音辨义'}</p>
+            {activity.kind === 'vocab-audio-choose-zh' ? (
+              <div className="audio-row">
+                <button className="secondary-btn" type="button" onClick={() => void playLessonAudio(activity.id, activity.audioUrl, activity.audioText || activity.word)}>
+                  {activity.audioUrl ? '播放标准音频' : '播放单词'}
+                </button>
+              </div>
+            ) : null}
+            {audioHint ? <p className={`status-inline ${audioHint.tone === 'warning' ? 'error' : 'success'}`}>{audioHint.text}</p> : null}
+            <p>{activity.question}</p>
+            <div className="choice-grid">
+              {activity.options.map((option) => (
+                <button
+                  key={option.id}
+                  className={`choice-card ${displayedChoiceAnswer === option.id ? 'selected' : ''} ${
+                    ((submission.status === 'done' || activeActivityLocked) && displayedChoiceAnswer === option.id && option.id === activity.correctOptionId)
+                      ? 'correct'
+                      : ''
+                  } ${wrongChoiceAnswer === option.id && submission.status !== 'done' && !activeActivityLocked ? 'wrong' : ''}`}
+                  onClick={() => void handleChoiceSelect(option.id)}
+                  disabled={submission.status === 'done' || activeActivityLocked}
+                >
+                  <span>{option.emoji}</span>
+                  <strong>{option.label}</strong>
+                </button>
+              ))}
+            </div>
+          </article>
+        </div>
+      )
+    }
+
+    if (activity.kind === 'vocab-cn-write-en' || activity.kind === 'vocab-audio-write-en') {
+      const audioHint = activity.kind === 'vocab-audio-write-en' ? getActivityAudioHint(activity) : null
+      return (
+        <div className="activity-block">
+          <article className="writing-card">
+            <p className="sentence-line">{activity.kind === 'vocab-cn-write-en' ? activity.meaning : '听音写词'}</p>
+            {activity.kind === 'vocab-audio-write-en' ? (
+              <div className="audio-row">
+                <button className="secondary-btn" type="button" onClick={() => void playLessonAudio(activity.id, activity.audioUrl, activity.audioText || activity.word)}>
+                  {activity.audioUrl ? '播放标准音频' : '播放单词'}
+                </button>
+              </div>
+            ) : null}
+            {audioHint ? <p className={`status-inline ${audioHint.tone === 'warning' ? 'error' : 'success'}`}>{audioHint.text}</p> : null}
+            <input
+              className="answer-input"
+              value={activeActivityLocked ? activity.answer : textAnswer}
+              onChange={(event) => setTextAnswer(event.target.value)}
+              placeholder="在这里输入英文单词"
+              disabled={activeActivityLocked}
+            />
+            {activeActivityLocked ? <span className="bubble-note">正确答案：{activity.answer}</span> : null}
+            <div className="tip-list">{activity.tips.map((tip) => <span key={tip}>{tip}</span>)}</div>
+          </article>
         </div>
       )
     }
@@ -2295,7 +2534,7 @@ function App() {
                         <small>{entry.feedback}</small>
                         {entry.passed ? (
                           <button className="primary-btn" type="button" onClick={goToNextActivity}>
-                            {activeActivityIndex === activeUnit.activities.length - 1 ? '返回地图看徽章' : '下一关'}
+                            {activeActivityIndex === activeUnitActivities.length - 1 ? '返回地图看徽章' : '下一关'}
                           </button>
                         ) : null}
                       </div>
@@ -2321,7 +2560,7 @@ function App() {
       return (
         <div className="activity-block">
           <article className="reading-card">
-            <h4>{activeUnit?.reading.title}</h4>
+            <h4>{activeUnit?.reading?.title || '阅读内容'}</h4>
             <p>{activity.passage}</p>
           </article>
           <p>{activity.question}</p>
@@ -2626,7 +2865,7 @@ function App() {
               {publishedUnits.map((unit) => {
                 const percent = getUnitProgressPercent(progress, unit)
                 const unitStars = getUnitStarCount(progress.activityResults, unit, speakingPassScore)
-                const maxUnitStars = unit.activities.length * 3
+                const maxUnitStars = (unit.activities || []).length * 3
                 const unitPerfect = perfectUnitIdSet.has(unit.id)
                 return (
                   <article key={unit.id} className={`unit-card ${unit.id === activeUnitId ? 'active' : ''}`} style={{ ['--card-accent' as string]: unit.themeColor }}>
@@ -2647,7 +2886,7 @@ function App() {
                     {unitStars > 0 ? renderPersistentStars(unitStars, `unit-stars:${unit.id}`, `${unit.title} ${unitStars} 星`) : null}
                     <div className="progress-line"><div style={{ width: `${percent}%` }} /></div>
                     <div className="unit-footer">
-                      <small>{getCompletedActivityCount(unit)}/{unit.activities.length} 已完成</small>
+                      <small>{getCompletedActivityCount(unit)}/{(unit.activities || []).length} 已完成</small>
                       <button className="secondary-btn" onClick={() => openUnit(unit.id)}>{percent > 0 ? (unitPerfect ? '回顾' : '继续') : '开始'}</button>
                     </div>
                   </article>
@@ -2666,11 +2905,11 @@ function App() {
               <h2>{activeUnit.title}</h2>
               <p>{activeUnit.goal}</p>
               <div className="lesson-progress"><div style={{ width: `${getUnitProgressPercent(progress, activeUnit)}%` }} /></div>
-              <small>{getCompletedActivityCount(activeUnit)} / {activeUnit.activities.length} 已完成</small>
+              <small>{getCompletedActivityCount(activeUnit)} / {activeUnitActivities.length} 已完成</small>
             </div>
-            <div className="lesson-list">
-              {activeUnit.activities.map((activity, index) => {
-                const done = progress.activityResults[`${activeUnit.id}:${activity.id}`]?.completed
+              <div className="lesson-list">
+              {activeUnitActivities.map((activity, index) => {
+                const done = findStoredActivityResult(progress.activityResults, activeUnit.id, activity.id, activity.lessonId || '')?.completed
                 const stars = getActivityStarCount(activeUnit.id, activity.id)
                 return (
                   <button
@@ -2706,7 +2945,8 @@ function App() {
             <p className="lesson-prompt">{activeActivity.prompt}</p>
             {renderActivity(activeActivity)}
             <div className="action-row">
-              {!activeActivityLocked && !['speak-repeat', 'listen-choice', 'read-choice', 'warmup', 'challenge'].includes(activeActivity.kind) ? (
+              {!activeActivityLocked &&
+              !['speak-repeat', 'listen-choice', 'read-choice', 'warmup', 'challenge', 'vocab-en-choose-zh', 'vocab-audio-choose-zh'].includes(activeActivity.kind) ? (
                 <button className="primary-btn" onClick={handleSubmitActivity} disabled={submission.status === 'done'}>
                   提交答案
                 </button>
@@ -2728,7 +2968,7 @@ function App() {
                 <p>{displayedSubmission.mistakes.length ? `已加入复习：${displayedSubmission.mistakes.join(' / ')}` : '本关没有新增薄弱点，继续保持。'}</p>
                 {displayedSubmission.completed ? (
                   <button className="primary-btn" onClick={goToNextActivity}>
-                    {activeActivityIndex === activeUnit.activities.length - 1 ? '返回地图看徽章' : '下一关'}
+                    {activeActivityIndex === activeUnitActivities.length - 1 ? '返回地图看徽章' : '下一关'}
                   </button>
                 ) : null}
               </div>
@@ -3108,7 +3348,8 @@ function App() {
                             </select>
                           </label>
                           <label>学习目标<textarea value={selectedDraft.goal} onChange={(event) => updateDraftField({ goal: event.target.value })} /></label>
-                          <label>词汇列表<textarea value={selectedDraft.vocabulary.map((item) => `${item.word} | ${item.meaning}`).join('\n')} onChange={(event) => updateDraftField({ vocabulary: event.target.value.split('\n').filter(Boolean).map((line, index) => {
+                          <label>词汇列表<textarea value={selectedDraftVocabulary.map((item) => `${item.word} | ${item.meaning}`).join('\n')} onChange={(event) => {
+                            const nextVocabulary = event.target.value.split('\n').filter(Boolean).map((line, index) => {
                             const [word, meaning] = line.split('|').map((item) => item.trim())
                             return {
                               id: `${selectedDraft.id}-vocab-${index + 1}`,
@@ -3117,21 +3358,27 @@ function App() {
                               meaning: meaning || '待校对',
                               imageLabel: '待补充插图',
                               example: `This is ${word || 'demo'}.`,
+                              sourcePageIds: selectedDraft.sourceImageIds,
+                              sourceLessonLabel: selectedDraft.lessons[0]?.sourceLessonLabel || 'LESSON 1',
+                              isCore: true,
+                              audioText: word || '',
                             }
-                          }) })} /></label>
+                          })
+                            updateDraftField({ vocabulary: nextVocabulary, vocabularyBank: nextVocabulary })
+                          }} /></label>
                           <label>句型列表<textarea value={selectedDraft.patterns.map((item) => item.sentence).join('\n')} onChange={(event) => updateDraftField({ patterns: event.target.value.split('\n').filter(Boolean).map((line, index) => ({
                             id: `${selectedDraft.id}-pattern-${index + 1}`,
                             sentence: line,
                             slots: ['demo'],
                             demoLine: line.replace('___', 'demo'),
                           })) })} /></label>
-                          <label>阅读标题<input value={selectedDraft.reading.title} onChange={(event) => updateDraftReading({ title: event.target.value })} /></label>
-                          <label>阅读音频文案<textarea value={selectedDraft.reading.audioText} onChange={(event) => updateDraftReading({ audioText: event.target.value })} /></label>
-                          <label>阅读问题<input value={selectedDraft.reading.question} onChange={(event) => updateDraftReading({ question: event.target.value })} /></label>
-                          <label>阅读内容<textarea value={selectedDraft.reading.content} onChange={(event) => updateDraftReading({ content: event.target.value })} /></label>
+                          <label>阅读标题<input value={selectedDraftReading.title} onChange={(event) => updateDraftReading({ title: event.target.value })} /></label>
+                          <label>阅读音频文案<textarea value={selectedDraftReading.audioText} onChange={(event) => updateDraftReading({ audioText: event.target.value })} /></label>
+                          <label>阅读问题<input value={selectedDraftReading.question} onChange={(event) => updateDraftReading({ question: event.target.value })} /></label>
+                          <label>阅读内容<textarea value={selectedDraftReading.content} onChange={(event) => updateDraftReading({ content: event.target.value })} /></label>
                         </div>
                         <div className="draft-list">
-                          {selectedDraft.activities.map((activity) => (
+                          {selectedDraftActivities.map((activity) => (
                             <article key={activity.id} className="settings-card">
                               <strong>{activity.title}</strong>
                               <small>{activity.kind}</small>
@@ -3212,8 +3459,8 @@ function App() {
                               value={activeAiVendor}
                               onChange={(event) =>
                                 void handleSaveProjectSettings({
+                                  ...projectSettings,
                                   activeAiVendor: event.target.value as AiVendor,
-                                  speakingPassScore,
                                 })
                               }
                               disabled={busyMap['save-project-settings']}
@@ -3228,7 +3475,7 @@ function App() {
                               value={speakingPassScore}
                               onChange={(event) =>
                                 void handleSaveProjectSettings({
-                                  activeAiVendor,
+                                  ...projectSettings,
                                   speakingPassScore: Number(event.target.value) as SpeakingPassScore,
                                 })
                               }
@@ -3241,6 +3488,39 @@ function App() {
                               ))}
                             </select>
                             <small className="field-note">当前规则：100 分得 3 星，80 分以上得 2 星，通过线以上得 1 星。</small>
+                          </label>
+                          <label>
+                            每日最短时长
+                            <input
+                              type="number"
+                              min="5"
+                              value={projectSettings.dailyLessonMinMinutes}
+                              onChange={(event) =>
+                                void handleSaveProjectSettings({
+                                  ...projectSettings,
+                                  dailyLessonMinMinutes: Math.max(5, Number(event.target.value) || 15),
+                                })
+                              }
+                              disabled={busyMap['save-project-settings']}
+                            />
+                          </label>
+                          <label>
+                            每日最大时长
+                            <input
+                              type="number"
+                              min={projectSettings.dailyLessonMinMinutes}
+                              value={projectSettings.dailyLessonMaxMinutes}
+                              onChange={(event) =>
+                                void handleSaveProjectSettings({
+                                  ...projectSettings,
+                                  dailyLessonMaxMinutes: Math.max(
+                                    projectSettings.dailyLessonMinMinutes,
+                                    Number(event.target.value) || projectSettings.dailyLessonMinMinutes,
+                                  ),
+                                })
+                              }
+                              disabled={busyMap['save-project-settings']}
+                            />
                           </label>
                         </div>
                         <div className="settings-note">

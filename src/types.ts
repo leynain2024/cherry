@@ -2,6 +2,10 @@ export type SkillTag = 'listen' | 'speak' | 'read' | 'write'
 
 export type ActivityKind =
   | 'warmup'
+  | 'vocab-cn-write-en'
+  | 'vocab-en-choose-zh'
+  | 'vocab-audio-write-en'
+  | 'vocab-audio-choose-zh'
   | 'listen-choice'
   | 'speak-repeat'
   | 'read-choice'
@@ -10,14 +14,36 @@ export type ActivityKind =
 
 export type UnitStatus = 'published' | 'draft'
 export type ContentOrigin = 'framework' | 'imported'
+export type InventoryContentType =
+  | 'vocabulary'
+  | 'dialogue'
+  | 'listening'
+  | 'speaking'
+  | 'reading'
+  | 'writing'
+  | 'pronunciation'
+  | 'pattern'
+  | 'assessment'
 
-export interface VocabularyItem {
+export interface AudioAssetRef {
+  audioAssetId?: string
+  audioText?: string
+  audioUrl?: string
+  audioMimeType?: string
+}
+
+export interface VocabularyItem extends AudioAssetRef {
   id: string
   word: string
   phonetic: string
   meaning: string
   imageLabel: string
   example: string
+  sourcePageIds: string[]
+  sourceLessonLabel?: string
+  relatedPatternIds?: string[]
+  introducedInLessonId?: string
+  isCore: boolean
 }
 
 export interface PatternItem {
@@ -25,14 +51,8 @@ export interface PatternItem {
   sentence: string
   slots: string[]
   demoLine: string
-}
-
-export interface ReadingItem {
-  id: string
-  title: string
-  content: string
-  audioText: string
-  question: string
+  sourcePageIds?: string[]
+  sourceLessonLabel?: string
 }
 
 export interface RewardRule {
@@ -49,68 +69,87 @@ export interface ChoiceOption {
   emoji?: string
 }
 
-export interface WarmupActivity {
+export interface BaseActivity {
   id: string
   title: string
   prompt: string
   skill: SkillTag
-  kind: 'warmup'
+  kind: ActivityKind
   durationMinutes: number
+  lessonId?: string
+  lessonTitle?: string
+  sourceInventoryIds?: string[]
+  sourcePageIds?: string[]
+  gameLabel?: string
+}
+
+export interface WarmupActivity extends BaseActivity {
+  kind: 'warmup'
   cards: VocabularyItem[]
 }
 
-export interface ListenChoiceActivity {
-  id: string
-  title: string
-  prompt: string
-  skill: SkillTag
-  kind: 'listen-choice'
-  durationMinutes: number
-  audioText: string
-  audioUrl?: string
-  audioMimeType?: string
+export interface VocabCnWriteEnActivity extends BaseActivity {
+  kind: 'vocab-cn-write-en'
+  vocabularyId: string
+  word: string
+  meaning: string
+  answer: string
+  tips: string[]
+}
+
+export interface VocabEnChooseZhActivity extends BaseActivity {
+  kind: 'vocab-en-choose-zh'
+  vocabularyId: string
+  word: string
   question: string
   options: ChoiceOption[]
   correctOptionId: string
 }
 
-export interface SpeakRepeatActivity {
-  id: string
-  title: string
-  prompt: string
-  skill: SkillTag
+export interface VocabAudioWriteEnActivity extends BaseActivity, AudioAssetRef {
+  kind: 'vocab-audio-write-en'
+  vocabularyId: string
+  word: string
+  meaning: string
+  answer: string
+  tips: string[]
+}
+
+export interface VocabAudioChooseZhActivity extends BaseActivity, AudioAssetRef {
+  kind: 'vocab-audio-choose-zh'
+  vocabularyId: string
+  word: string
+  question: string
+  options: ChoiceOption[]
+  correctOptionId: string
+}
+
+export interface ListenChoiceActivity extends BaseActivity, AudioAssetRef {
+  kind: 'listen-choice'
+  question: string
+  options: ChoiceOption[]
+  correctOptionId: string
+}
+
+export interface SpeakRepeatActivity extends BaseActivity, AudioAssetRef {
   kind: 'speak-repeat'
-  durationMinutes: number
   transcript: string
-  audioUrl?: string
-  audioMimeType?: string
   hint: string
   encouragement: string[]
 }
 
-export interface ReadChoiceActivity {
-  id: string
-  title: string
-  prompt: string
-  skill: SkillTag
+export interface ReadChoiceActivity extends BaseActivity {
   kind: 'read-choice'
-  durationMinutes: number
   passage: string
+  audioText?: string
   question: string
   options: ChoiceOption[]
   correctOptionId: string
 }
 
-export interface WriteSpellActivity {
-  id: string
-  title: string
-  prompt: string
-  skill: SkillTag
+export interface WriteSpellActivity extends BaseActivity, AudioAssetRef {
   kind: 'write-spell'
-  durationMinutes: number
   sentence: string
-  audioUrl?: string
-  audioMimeType?: string
   answer: string
   tips: string[]
 }
@@ -122,24 +161,67 @@ export interface ChallengeQuestion {
   correctOptionId: string
 }
 
-export interface ChallengeActivity {
-  id: string
-  title: string
-  prompt: string
-  skill: SkillTag
+export interface ChallengeActivity extends BaseActivity {
   kind: 'challenge'
-  durationMinutes: number
   reviewIds: string[]
   questions: ChallengeQuestion[]
 }
 
 export type Activity =
   | WarmupActivity
+  | VocabCnWriteEnActivity
+  | VocabEnChooseZhActivity
+  | VocabAudioWriteEnActivity
+  | VocabAudioChooseZhActivity
   | ListenChoiceActivity
   | SpeakRepeatActivity
   | ReadChoiceActivity
   | WriteSpellActivity
   | ChallengeActivity
+
+export interface LessonSection {
+  id: string
+  skill: SkillTag
+  title: string
+  activityIds: string[]
+  estimatedMinutes: number
+}
+
+export interface Lesson {
+  id: string
+  title: string
+  order: number
+  estimatedMinutes: number
+  sourcePageIds: string[]
+  sourceLessonLabel: string
+  vocabularyRefs: string[]
+  sections: LessonSection[]
+  activities: Activity[]
+  lessonQuiz?: ChallengeActivity | null
+}
+
+export interface ContentInventoryItem {
+  id: string
+  sequence: number
+  sourcePageIds: string[]
+  sourceLessonLabel: string
+  sourceSectionLabel: string
+  contentType: InventoryContentType
+  title: string
+  skill: SkillTag
+  estimatedMinutes: number
+  vocabularyIds: string[]
+  content: Record<string, unknown>
+}
+
+export interface UnitAssessment {
+  id: string
+  title: string
+  prompt: string
+  durationMinutes: number
+  reviewIds: string[]
+  questions: ChallengeQuestion[]
+}
 
 export interface Unit {
   id: string
@@ -157,10 +239,23 @@ export interface Unit {
   contentOrigin: ContentOrigin
   sourceImageIds: string[]
   rewardRule: RewardRule
-  vocabulary: VocabularyItem[]
+  vocabularyBank: VocabularyItem[]
   patterns: PatternItem[]
-  reading: ReadingItem
-  activities: Activity[]
+  contentInventory: ContentInventoryItem[]
+  lessons: Lesson[]
+  unitReview?: UnitAssessment | null
+  unitTest?: UnitAssessment | null
+  vocabulary?: VocabularyItem[]
+  reading?: {
+    id: string
+    title: string
+    content: string
+    audioText: string
+    question: string
+  }
+  activities?: Activity[]
+  createdAt?: string
+  updatedAt?: string
 }
 
 export interface Subject {
@@ -185,6 +280,7 @@ export interface SubjectImage {
 
 export interface ActivityResult {
   unitId: string
+  lessonId: string
   activityId: string
   completed: boolean
   score: number
@@ -331,6 +427,8 @@ export interface ProviderSetting {
 export interface ProjectSettings {
   activeAiVendor: AiVendor
   speakingPassScore: SpeakingPassScore
+  dailyLessonMinMinutes: number
+  dailyLessonMaxMinutes: number
 }
 
 export interface UsageLog {
@@ -365,6 +463,8 @@ export interface GenerationJob {
   totalImages: number
   message: string
   hasOcrText: boolean
+  hasDraftResponse: boolean
+  hasParsedPayload: boolean
   draftUnitId?: string
   errorMessage?: string
   createdAt: string
@@ -384,6 +484,7 @@ export interface SpeakingEvaluationResult {
 export interface AdminState {
   subjects: Array<Subject & { images: SubjectImage[]; units: Unit[] }>
   drafts: Unit[]
+  generationJobs: GenerationJob[]
   projectSettings: ProjectSettings
   providerSettings: ProviderSetting[]
   usageLogs: UsageLog[]

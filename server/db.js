@@ -27,7 +27,7 @@ const openAiDefaults = {
   model: 'gpt-5.2',
   reasoningEffort: 'high',
   verbosity: 'medium',
-  maxOutputTokens: 2048,
+  maxOutputTokens: 8192,
   speechModel: 'gpt-4o-mini-transcribe',
   ttsModel: 'gpt-4o-mini-tts',
   ttsVoice: 'alloy',
@@ -135,11 +135,18 @@ const speakingPassScoreOptions = [60, 65, 70, 75]
 const projectSettingsDefaults = {
   activeAiVendor: 'openai',
   speakingPassScore: 60,
+  dailyLessonMinMinutes: 15,
+  dailyLessonMaxMinutes: 15,
 }
 
 const normalizeProjectSettings = (input = {}) => ({
   activeAiVendor: input.activeAiVendor === 'aliyun' ? 'aliyun' : 'openai',
   speakingPassScore: speakingPassScoreOptions.includes(Number(input.speakingPassScore)) ? Number(input.speakingPassScore) : 60,
+  dailyLessonMinMinutes: Math.max(5, Number(input.dailyLessonMinMinutes) || projectSettingsDefaults.dailyLessonMinMinutes),
+  dailyLessonMaxMinutes: Math.max(
+    Math.max(5, Number(input.dailyLessonMinMinutes) || projectSettingsDefaults.dailyLessonMinMinutes),
+    Number(input.dailyLessonMaxMinutes) || projectSettingsDefaults.dailyLessonMaxMinutes,
+  ),
 })
 
 const getScoreStars = (score, speakingPassScore) => {
@@ -260,28 +267,178 @@ const normalizeProviderInput = (provider, input = {}) => {
   return normalizeAliyunOcrProviderInput(input)
 }
 
-const unitRowToObject = (row) => ({
-  id: row.id,
-  subjectId: row.subject_id,
-  title: row.title,
-  source: row.source,
-  stage: row.stage,
-  goal: row.goal,
-  difficulty: row.difficulty,
-  unlockOrder: row.unlock_order,
-  coverEmoji: row.cover_emoji,
-  themeColor: row.theme_color,
-  status: row.status,
-  contentOrigin: row.content_origin,
-  sourceImageIds: parseJson(row.source_image_ids, []),
-  rewardRule: parseJson(row.reward_rule_json, {}),
-  vocabulary: parseJson(row.vocabulary_json, []),
-  patterns: parseJson(row.patterns_json, []),
-  reading: parseJson(row.reading_json, {}),
-  activities: parseJson(row.activities_json, []),
-  createdAt: row.created_at,
-  updatedAt: row.updated_at,
-})
+const flattenLessonActivities = (lessons = []) =>
+  lessons.flatMap((lesson) =>
+    (lesson.activities || []).map((activity) => ({
+      ...activity,
+      lessonId: lesson.id,
+      lessonTitle: lesson.title,
+    })),
+  )
+
+const buildLessonSections = (lessonId, activities = []) =>
+  ['listen', 'speak', 'read', 'write'].map((skill) => {
+    const skillActivities = activities.filter((activity) => activity.skill === skill)
+    return {
+      id: `${lessonId}-${skill}`,
+      skill,
+      title: skill.toUpperCase(),
+      activityIds: skillActivities.map((activity) => activity.id),
+      estimatedMinutes: skillActivities.reduce((total, activity) => total + (activity.durationMinutes || 0), 0),
+    }
+  })
+
+const buildLegacyActivities = (unit, vocabularyBank) => {
+  const activities = Array.isArray(unit.activities) ? [...unit.activities] : []
+  const reading = unit.reading || null
+  const hasReadChoice = activities.some((activity) => activity.kind === 'read-choice')
+
+  if (!hasReadChoice && reading && (reading.content || reading.question)) {
+    activities.unshift({
+      id: reading.id || `${unit.id}-reading`,
+      title: reading.title || '阅读理解',
+      prompt: '读一读，再回答问题。',
+      skill: 'read',
+      kind: 'read-choice',
+      durationMinutes: 3,
+      passage: reading.content || '',
+      audioText: reading.audioText || '',
+      question: reading.question || '根据内容选择正确答案。',
+      options: [
+        {
+          id: 'a',
+          label: vocabularyBank[0]?.meaning || '继续学习',
+        },
+      ],
+      correctOptionId: 'a',
+    })
+  }
+
+  return activities
+}
+
+const normalizeUnitShape = (unit) => {
+  const vocabularyBank =
+    (Array.isArray(unit?.vocabularyBank) && unit.vocabularyBank.length ? unit.vocabularyBank : null) ||
+    (Array.isArray(unit?.vocabulary) ? unit.vocabulary : [])
+  const contentInventory = Array.isArray(unit?.contentInventory) ? unit.contentInventory : []
+  const lessonSeed =
+    Array.isArray(unit?.lessons) && unit.lessons.length
+      ? unit.lessons
+      : [
+          {
+            id: `${unit.id}-lesson-1`,
+            title: `${unit.title} Lesson 1`,
+            order: 1,
+            estimatedMinutes: 0,
+            sourcePageIds: Array.isArray(unit?.sourceImageIds) ? unit.sourceImageIds : [],
+            sourceLessonLabel: 'LESSON 1',
+            vocabularyRefs: vocabularyBank.map((item) => item.id),
+            sections: [],
+            activities: buildLegacyActivities(unit, vocabularyBank),
+            lessonQuiz: null,
+          },
+        ]
+
+  const lessons = lessonSeed
+    .map((lesson, index) => {
+      const lessonId = lesson.id || `${unit.id}-lesson-${index + 1}`
+      const lessonTitle = lesson.title || `${unit.title} Lesson ${index + 1}`
+      const activities = (lesson.activities || []).map((activity) => ({
+        ...activity,
+        lessonId: activity.lessonId || lessonId,
+        lessonTitle: activity.lessonTitle || lessonTitle,
+      }))
+      return {
+        id: lessonId,
+        title: lessonTitle,
+        order: lesson.order || index + 1,
+        estimatedMinutes:
+          lesson.estimatedMinutes || activities.reduce((total, activity) => total + (activity.durationMinutes || 0), 0),
+        sourcePageIds:
+          Array.isArray(lesson.sourcePageIds) && lesson.sourcePageIds.length
+            ? lesson.sourcePageIds
+            : Array.isArray(unit?.sourceImageIds)
+              ? unit.sourceImageIds
+              : [],
+        sourceLessonLabel: lesson.sourceLessonLabel || `LESSON ${index + 1}`,
+        vocabularyRefs:
+          Array.isArray(lesson.vocabularyRefs) && lesson.vocabularyRefs.length
+            ? lesson.vocabularyRefs
+            : vocabularyBank.map((item) => item.id),
+        sections:
+          Array.isArray(lesson.sections) && lesson.sections.length ? lesson.sections : buildLessonSections(lessonId, activities),
+        activities,
+        lessonQuiz: lesson.lessonQuiz || activities.find((activity) => activity.kind === 'challenge') || null,
+      }
+    })
+    .filter(Boolean)
+
+  const activities = flattenLessonActivities(lessons)
+
+  return {
+    ...unit,
+    vocabularyBank,
+    contentInventory,
+    lessons,
+    unitReview: unit?.unitReview ?? null,
+    unitTest: unit?.unitTest ?? null,
+    vocabulary: vocabularyBank,
+    reading: deriveReadingSummary(lessons),
+    activities,
+  }
+}
+
+const deriveReadingSummary = (lessons = []) => {
+  const readActivity = flattenLessonActivities(lessons).find((activity) => activity.kind === 'read-choice')
+  if (!readActivity) {
+    return {
+      id: randomUUID(),
+      title: '阅读内容',
+      content: '',
+      audioText: '',
+      question: '',
+    }
+  }
+
+  return {
+    id: `reading-${readActivity.id}`,
+    title: readActivity.title,
+    content: readActivity.passage || '',
+    audioText: readActivity.audioText || '',
+    question: readActivity.question || '',
+  }
+}
+
+const unitRowToObject = (row) => {
+  return normalizeUnitShape({
+    id: row.id,
+    subjectId: row.subject_id,
+    title: row.title,
+    source: row.source,
+    stage: row.stage,
+    goal: row.goal,
+    difficulty: row.difficulty,
+    unlockOrder: row.unlock_order,
+    coverEmoji: row.cover_emoji,
+    themeColor: row.theme_color,
+    status: row.status,
+    contentOrigin: row.content_origin,
+    sourceImageIds: parseJson(row.source_image_ids, []),
+    rewardRule: parseJson(row.reward_rule_json, {}),
+    vocabulary: parseJson(row.vocabulary_json, []),
+    vocabularyBank: parseJson(row.vocabulary_bank_json, parseJson(row.vocabulary_json, [])),
+    patterns: parseJson(row.patterns_json, []),
+    contentInventory: parseJson(row.content_inventory_json, []),
+    lessons: parseJson(row.lessons_json, []),
+    reading: parseJson(row.reading_json, {}),
+    activities: parseJson(row.activities_json, []),
+    unitReview: parseJson(row.unit_review_json, null),
+    unitTest: parseJson(row.unit_test_json, null),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  })
+}
 
 const userRowToObject = (row) => ({
   id: row.id,
@@ -296,6 +453,7 @@ const userRowToObject = (row) => ({
 
 const progressRowToActivityResult = (row) => ({
   unitId: row.unit_id,
+  lessonId: row.lesson_id || '',
   activityId: row.activity_id,
   completed: row.completed === 1,
   score: row.score,
@@ -335,11 +493,15 @@ const generationJobRowToObject = (row) => ({
   totalImages: row.total_images || 0,
   message: row.message || '',
   hasOcrText: Boolean(row.ocr_text),
+  hasDraftResponse: Boolean(row.draft_response_text),
+  hasParsedPayload: Boolean(row.parsed_payload_json),
   draftUnitId: row.draft_unit_id || '',
   errorMessage: row.error_message || '',
   createdAt: row.created_at,
   updatedAt: row.updated_at || row.created_at,
 })
+
+const isStructuredUnit = (unit) => Array.isArray(unit?.lessons) && unit.lessons.length > 0
 
 export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
   const dataDir = path.join(rootDir, 'data')
@@ -397,6 +559,7 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
     CREATE TABLE IF NOT EXISTS user_activity_progress (
       user_id TEXT NOT NULL,
       unit_id TEXT NOT NULL,
+      lesson_id TEXT,
       activity_id TEXT NOT NULL,
       completed INTEGER NOT NULL,
       score INTEGER NOT NULL,
@@ -451,6 +614,11 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
       patterns_json TEXT NOT NULL,
       reading_json TEXT NOT NULL,
       activities_json TEXT NOT NULL,
+      vocabulary_bank_json TEXT NOT NULL DEFAULT '[]',
+      content_inventory_json TEXT NOT NULL DEFAULT '[]',
+      lessons_json TEXT NOT NULL DEFAULT '[]',
+      unit_review_json TEXT NOT NULL DEFAULT 'null',
+      unit_test_json TEXT NOT NULL DEFAULT 'null',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -538,6 +706,34 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
     db.exec('ALTER TABLE generation_jobs ADD COLUMN updated_at TEXT')
     db.prepare('UPDATE generation_jobs SET updated_at = created_at WHERE updated_at IS NULL').run()
   }
+  if (!generationJobColumns.some((column) => column.name === 'draft_response_text')) {
+    db.exec('ALTER TABLE generation_jobs ADD COLUMN draft_response_text TEXT')
+  }
+  if (!generationJobColumns.some((column) => column.name === 'parsed_payload_json')) {
+    db.exec('ALTER TABLE generation_jobs ADD COLUMN parsed_payload_json TEXT')
+  }
+
+  const unitColumns = db.prepare('PRAGMA table_info(units)').all()
+  if (!unitColumns.some((column) => column.name === 'vocabulary_bank_json')) {
+    db.exec(`ALTER TABLE units ADD COLUMN vocabulary_bank_json TEXT NOT NULL DEFAULT '[]'`)
+  }
+  if (!unitColumns.some((column) => column.name === 'content_inventory_json')) {
+    db.exec(`ALTER TABLE units ADD COLUMN content_inventory_json TEXT NOT NULL DEFAULT '[]'`)
+  }
+  if (!unitColumns.some((column) => column.name === 'lessons_json')) {
+    db.exec(`ALTER TABLE units ADD COLUMN lessons_json TEXT NOT NULL DEFAULT '[]'`)
+  }
+  if (!unitColumns.some((column) => column.name === 'unit_review_json')) {
+    db.exec(`ALTER TABLE units ADD COLUMN unit_review_json TEXT NOT NULL DEFAULT 'null'`)
+  }
+  if (!unitColumns.some((column) => column.name === 'unit_test_json')) {
+    db.exec(`ALTER TABLE units ADD COLUMN unit_test_json TEXT NOT NULL DEFAULT 'null'`)
+  }
+
+  const userActivityColumns = db.prepare('PRAGMA table_info(user_activity_progress)').all()
+  if (!userActivityColumns.some((column) => column.name === 'lesson_id')) {
+    db.exec('ALTER TABLE user_activity_progress ADD COLUMN lesson_id TEXT')
+  }
 
   const providerDefaults = [
     {
@@ -618,6 +814,14 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
     })
   })
 
+  db.prepare(
+    `
+      UPDATE provider_settings
+      SET max_output_tokens = ?, updated_at = ?
+      WHERE provider = 'openai' AND max_output_tokens = 2048
+    `,
+  ).run(openAiDefaults.maxOutputTokens, now())
+
   db.prepare(`
     INSERT OR IGNORE INTO app_settings (key, value_json, updated_at)
     VALUES (?, ?, ?)
@@ -633,35 +837,45 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
       themeColor: defaultSubject.themeColor,
     })
 
-    const insertUnit = db.prepare(`
+  }
+
+  const unitCount = db.prepare('SELECT COUNT(*) AS count FROM units').get().count
+  if (!unitCount) {
+    const seedInsertUnit = db.prepare(`
       INSERT INTO units
-      (id, subject_id, title, source, stage, goal, difficulty, unlock_order, cover_emoji, theme_color, status, content_origin, source_image_ids, reward_rule_json, vocabulary_json, patterns_json, reading_json, activities_json, created_at, updated_at)
+      (id, subject_id, title, source, stage, goal, difficulty, unlock_order, cover_emoji, theme_color, status, content_origin, source_image_ids, reward_rule_json, vocabulary_json, patterns_json, reading_json, activities_json, vocabulary_bank_json, content_inventory_json, lessons_json, unit_review_json, unit_test_json, created_at, updated_at)
       VALUES
-      (@id, @subjectId, @title, @source, @stage, @goal, @difficulty, @unlockOrder, @coverEmoji, @themeColor, @status, @contentOrigin, @sourceImageIds, @rewardRuleJson, @vocabularyJson, @patternsJson, @readingJson, @activitiesJson, @createdAt, @updatedAt)
+      (@id, @subjectId, @title, @source, @stage, @goal, @difficulty, @unlockOrder, @coverEmoji, @themeColor, @status, @contentOrigin, @sourceImageIds, @rewardRuleJson, @vocabularyJson, @patternsJson, @readingJson, @activitiesJson, @vocabularyBankJson, @contentInventoryJson, @lessonsJson, @unitReviewJson, @unitTestJson, @createdAt, @updatedAt)
     `)
 
     buildFrameworkUnits(defaultSubject.id).forEach((unit) => {
-      insertUnit.run({
-        id: unit.id,
-        subjectId: unit.subjectId,
-        title: unit.title,
-        source: unit.source,
-        stage: unit.stage,
-        goal: unit.goal,
-        difficulty: unit.difficulty,
-        unlockOrder: unit.unlockOrder,
-        coverEmoji: unit.coverEmoji,
-        themeColor: unit.themeColor,
-        status: unit.status,
-        contentOrigin: unit.contentOrigin,
-        sourceImageIds: serializeJson(unit.sourceImageIds),
-        rewardRuleJson: serializeJson(unit.rewardRule),
-        vocabularyJson: serializeJson(unit.vocabulary),
-        patternsJson: serializeJson(unit.patterns),
-        readingJson: serializeJson(unit.reading),
-        activitiesJson: serializeJson(unit.activities),
-        createdAt: now(),
-        updatedAt: now(),
+      const normalizedUnit = normalizeUnitShape(unit)
+      seedInsertUnit.run({
+        id: normalizedUnit.id,
+        subjectId: normalizedUnit.subjectId,
+        title: normalizedUnit.title,
+        source: normalizedUnit.source,
+        stage: normalizedUnit.stage,
+        goal: normalizedUnit.goal,
+        difficulty: normalizedUnit.difficulty,
+        unlockOrder: normalizedUnit.unlockOrder,
+        coverEmoji: normalizedUnit.coverEmoji,
+        themeColor: normalizedUnit.themeColor,
+        status: normalizedUnit.status,
+        contentOrigin: normalizedUnit.contentOrigin,
+        sourceImageIds: serializeJson(normalizedUnit.sourceImageIds),
+        rewardRuleJson: serializeJson(normalizedUnit.rewardRule),
+        vocabularyJson: serializeJson(normalizedUnit.vocabulary),
+        patternsJson: serializeJson(normalizedUnit.patterns),
+        readingJson: serializeJson(normalizedUnit.reading),
+        activitiesJson: serializeJson(normalizedUnit.activities),
+        vocabularyBankJson: serializeJson(normalizedUnit.vocabularyBank || []),
+        contentInventoryJson: serializeJson(normalizedUnit.contentInventory || []),
+        lessonsJson: serializeJson(normalizedUnit.lessons || []),
+        unitReviewJson: serializeJson(normalizedUnit.unitReview ?? null),
+        unitTestJson: serializeJson(normalizedUnit.unitTest ?? null),
+        createdAt: unit.createdAt || now(),
+        updatedAt: unit.updatedAt || now(),
       })
     })
   }
@@ -694,9 +908,9 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
   `)
   const insertUserActivityProgress = db.prepare(`
     INSERT INTO user_activity_progress
-    (user_id, unit_id, activity_id, completed, score, duration_seconds, mistakes_json, completed_at)
+    (user_id, unit_id, lesson_id, activity_id, completed, score, duration_seconds, mistakes_json, completed_at)
     VALUES
-    (@userId, @unitId, @activityId, @completed, @score, @durationSeconds, @mistakesJson, @completedAt)
+    (@userId, @unitId, @lessonId, @activityId, @completed, @score, @durationSeconds, @mistakesJson, @completedAt)
   `)
   const listSpeakingRecordingsStmt = db.prepare(`
     SELECT * FROM speaking_recordings
@@ -723,14 +937,19 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
         patterns_json = @patternsJson,
         reading_json = @readingJson,
         activities_json = @activitiesJson,
+        vocabulary_bank_json = @vocabularyBankJson,
+        content_inventory_json = @contentInventoryJson,
+        lessons_json = @lessonsJson,
+        unit_review_json = @unitReviewJson,
+        unit_test_json = @unitTestJson,
         updated_at = @updatedAt
     WHERE id = @id
   `)
   const insertUnitStmt = db.prepare(`
     INSERT INTO units
-    (id, subject_id, title, source, stage, goal, difficulty, unlock_order, cover_emoji, theme_color, status, content_origin, source_image_ids, reward_rule_json, vocabulary_json, patterns_json, reading_json, activities_json, created_at, updated_at)
+    (id, subject_id, title, source, stage, goal, difficulty, unlock_order, cover_emoji, theme_color, status, content_origin, source_image_ids, reward_rule_json, vocabulary_json, patterns_json, reading_json, activities_json, vocabulary_bank_json, content_inventory_json, lessons_json, unit_review_json, unit_test_json, created_at, updated_at)
     VALUES
-    (@id, @subjectId, @title, @source, @stage, @goal, @difficulty, @unlockOrder, @coverEmoji, @themeColor, @status, @contentOrigin, @sourceImageIds, @rewardRuleJson, @vocabularyJson, @patternsJson, @readingJson, @activitiesJson, @createdAt, @updatedAt)
+    (@id, @subjectId, @title, @source, @stage, @goal, @difficulty, @unlockOrder, @coverEmoji, @themeColor, @status, @contentOrigin, @sourceImageIds, @rewardRuleJson, @vocabularyJson, @patternsJson, @readingJson, @activitiesJson, @vocabularyBankJson, @contentInventoryJson, @lessonsJson, @unitReviewJson, @unitTestJson, @createdAt, @updatedAt)
   `)
 
   const normalizeProviderSetting = (row) => {
@@ -777,6 +996,7 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
     const publishedUnits = listUnitsByStatus
       .all('published')
       .map(unitRowToObject)
+      .filter(isStructuredUnit)
       .filter((unit) => !subjectId || unit.subjectId === subjectId)
     const publishedUnitIds = new Set(publishedUnits.map((unit) => unit.id))
     const profile = findUserProfile.get(userId)
@@ -784,7 +1004,21 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
       .all(userId)
       .filter((row) => !subjectId || publishedUnitIds.has(row.unit_id))
     const activityResults = activityRows.reduce((acc, row) => {
-      acc[`${row.unit_id}:${row.activity_id}`] = progressRowToActivityResult(row)
+      const unit = publishedUnits.find((item) => item.id === row.unit_id)
+      const inferredLessonId =
+        row.lesson_id ||
+        flattenLessonActivities(unit?.lessons || []).find((activity) => activity.id === row.activity_id)?.lessonId ||
+        ''
+      const result = {
+        ...progressRowToActivityResult(row),
+        lessonId: inferredLessonId,
+      }
+      const key = `${row.unit_id}:${inferredLessonId}:${row.activity_id}`
+      acc[key] = result
+      const legacyKey = `${row.unit_id}:${row.activity_id}`
+      if (!acc[legacyKey]) {
+        acc[legacyKey] = result
+      }
       return acc
     }, {})
     const completedUnitIds = parseJson(profile?.completed_unit_ids_json, []).filter(
@@ -829,6 +1063,7 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
       insertUserActivityProgress.run({
         userId,
         unitId: result.unitId,
+        lessonId: result.lessonId || '',
         activityId: result.activityId,
         completed: result.completed ? 1 : 0,
         score: result.score || 0,
@@ -1080,6 +1315,7 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
       const publishedUnits = listUnitsByStatus
         .all('published')
         .map(unitRowToObject)
+        .filter(isStructuredUnit)
         .filter((unit) => !currentUser.subjectId || unit.subjectId === currentUser.subjectId)
       return {
         subjects,
@@ -1107,7 +1343,7 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
         status: subject.status,
         createdAt: subject.created_at,
       }))
-      const publishedUnits = listUnitsByStatus.all('published').map(unitRowToObject)
+      const publishedUnits = listUnitsByStatus.all('published').map(unitRowToObject).filter(isStructuredUnit)
       return { subjects, units: publishedUnits }
     },
     getAdminState() {
@@ -1127,10 +1363,10 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
           pageLabel: image.page_label,
           url: `/uploads/${path.basename(image.file_path)}`,
         })),
-        units: listAllUnits.all().filter((unit) => unit.subject_id === subject.id).map(unitRowToObject),
+        units: listAllUnits.all().filter((unit) => unit.subject_id === subject.id).map(unitRowToObject).filter(isStructuredUnit),
       }))
 
-      const drafts = listAllUnits.all().filter((unit) => unit.status === 'draft').map(unitRowToObject)
+      const drafts = listAllUnits.all().filter((unit) => unit.status === 'draft').map(unitRowToObject).filter(isStructuredUnit)
       const projectSettings = getProjectSettings()
       const providerSettings = db.prepare('SELECT * FROM provider_settings ORDER BY provider ASC').all().map(normalizeProviderSetting)
       const usageLogs = db.prepare('SELECT * FROM usage_logs ORDER BY timestamp DESC LIMIT 200').all().map((row) => ({
@@ -1150,7 +1386,15 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
         details: parseJson(row.details_json, {}),
       }))
 
-      return { subjects, drafts, projectSettings, providerSettings, usageLogs, users: this.listUsers() }
+      return {
+        subjects,
+        drafts,
+        generationJobs: this.listGenerationJobs({ limit: 50 }),
+        projectSettings,
+        providerSettings,
+        usageLogs,
+        users: this.listUsers(),
+      }
     },
     getProjectSettings,
     saveProjectSettings(input) {
@@ -1230,30 +1474,36 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
       }
     },
     insertUnit(unit) {
+      const normalizedUnit = normalizeUnitShape(unit)
       const payload = {
-        id: unit.id,
-        subjectId: unit.subjectId,
-        title: unit.title,
-        source: unit.source,
-        stage: unit.stage,
-        goal: unit.goal,
-        difficulty: unit.difficulty,
-        unlockOrder: unit.unlockOrder,
-        coverEmoji: unit.coverEmoji,
-        themeColor: unit.themeColor,
-        status: unit.status,
-        contentOrigin: unit.contentOrigin,
-        sourceImageIds: serializeJson(unit.sourceImageIds),
-        rewardRuleJson: serializeJson(unit.rewardRule),
-        vocabularyJson: serializeJson(unit.vocabulary),
-        patternsJson: serializeJson(unit.patterns),
-        readingJson: serializeJson(unit.reading),
-        activitiesJson: serializeJson(unit.activities),
+        id: normalizedUnit.id,
+        subjectId: normalizedUnit.subjectId,
+        title: normalizedUnit.title,
+        source: normalizedUnit.source,
+        stage: normalizedUnit.stage,
+        goal: normalizedUnit.goal,
+        difficulty: normalizedUnit.difficulty,
+        unlockOrder: normalizedUnit.unlockOrder,
+        coverEmoji: normalizedUnit.coverEmoji,
+        themeColor: normalizedUnit.themeColor,
+        status: normalizedUnit.status,
+        contentOrigin: normalizedUnit.contentOrigin,
+        sourceImageIds: serializeJson(normalizedUnit.sourceImageIds),
+        rewardRuleJson: serializeJson(normalizedUnit.rewardRule),
+        vocabularyJson: serializeJson(normalizedUnit.vocabulary || []),
+        patternsJson: serializeJson(normalizedUnit.patterns),
+        readingJson: serializeJson(normalizedUnit.reading || {}),
+        activitiesJson: serializeJson(normalizedUnit.activities || []),
+        vocabularyBankJson: serializeJson(normalizedUnit.vocabularyBank || []),
+        contentInventoryJson: serializeJson(normalizedUnit.contentInventory || []),
+        lessonsJson: serializeJson(normalizedUnit.lessons || []),
+        unitReviewJson: serializeJson(normalizedUnit.unitReview ?? null),
+        unitTestJson: serializeJson(normalizedUnit.unitTest ?? null),
         createdAt: now(),
         updatedAt: now(),
       }
       insertUnitStmt.run(payload)
-      return unit
+      return normalizedUnit
     },
     updateUnit(partial) {
       const existing = findUnit.get(partial.id)
@@ -1262,10 +1512,33 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
       }
 
       const current = unitRowToObject(existing)
-      const next = {
-        ...current,
-        ...partial,
-      }
+      const baseLessons =
+        Array.isArray(partial.lessons) && partial.lessons.length ? partial.lessons : current.lessons
+      const merged =
+        Array.isArray(partial.activities)
+          ? {
+              ...current,
+              ...partial,
+              lessons: baseLessons.map((lesson) => ({
+                ...lesson,
+                activities: lesson.activities.map((activity) => {
+                  const nextActivity = partial.activities.find((item) => item.id === activity.id)
+                  return nextActivity
+                    ? {
+                        ...activity,
+                        ...nextActivity,
+                        lessonId: nextActivity.lessonId || activity.lessonId || lesson.id,
+                        lessonTitle: nextActivity.lessonTitle || activity.lessonTitle || lesson.title,
+                      }
+                    : activity
+                }),
+              })),
+            }
+          : {
+              ...current,
+              ...partial,
+            }
+      const next = normalizeUnitShape(merged)
 
       updateUnitStmt.run({
         id: next.id,
@@ -1281,10 +1554,15 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
         contentOrigin: next.contentOrigin,
         sourceImageIds: serializeJson(next.sourceImageIds),
         rewardRuleJson: serializeJson(next.rewardRule),
-        vocabularyJson: serializeJson(next.vocabulary),
+        vocabularyJson: serializeJson(next.vocabulary || []),
         patternsJson: serializeJson(next.patterns),
-        readingJson: serializeJson(next.reading),
-        activitiesJson: serializeJson(next.activities),
+        readingJson: serializeJson(next.reading || {}),
+        activitiesJson: serializeJson(next.activities || []),
+        vocabularyBankJson: serializeJson(next.vocabularyBank || []),
+        contentInventoryJson: serializeJson(next.contentInventory || []),
+        lessonsJson: serializeJson(next.lessons || []),
+        unitReviewJson: serializeJson(next.unitReview ?? null),
+        unitTestJson: serializeJson(next.unitTest ?? null),
         updatedAt: now(),
       })
       return next
@@ -1372,9 +1650,36 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
       const row = db.prepare('SELECT * FROM generation_jobs WHERE id = ?').get(jobId)
       return row ? generationJobRowToObject(row) : null
     },
+    listGenerationJobs({ subjectId = '', limit = 30 } = {}) {
+      const safeLimit = Math.max(1, Math.min(200, Number(limit) || 30))
+      const query = subjectId
+        ? db.prepare(`
+            SELECT *
+            FROM generation_jobs
+            WHERE subject_id = ?
+            ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC
+            LIMIT ?
+          `)
+        : db.prepare(`
+            SELECT *
+            FROM generation_jobs
+            ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC
+            LIMIT ?
+          `)
+      const rows = subjectId ? query.all(subjectId, safeLimit) : query.all(safeLimit)
+      return rows.map(generationJobRowToObject)
+    },
     getGenerationJobOcrText(jobId) {
       const row = db.prepare('SELECT ocr_text FROM generation_jobs WHERE id = ?').get(jobId)
       return row?.ocr_text || ''
+    },
+    getGenerationJobDraftResponse(jobId) {
+      const row = db.prepare('SELECT draft_response_text FROM generation_jobs WHERE id = ?').get(jobId)
+      return row?.draft_response_text || ''
+    },
+    getGenerationJobParsedPayload(jobId) {
+      const row = db.prepare('SELECT parsed_payload_json FROM generation_jobs WHERE id = ?').get(jobId)
+      return parseJson(row?.parsed_payload_json, null)
     },
     updateGenerationJobProgress({ jobId, stage, processedImages, totalImages, message }) {
       const existing = this.getGenerationJob(jobId)
@@ -1408,6 +1713,26 @@ export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
             updated_at = ?
         WHERE id = ?
       `).run(ocrText, now(), jobId)
+
+      return this.getGenerationJob(jobId)
+    },
+    saveGenerationJobDraftResponse({ jobId, responseText }) {
+      db.prepare(`
+        UPDATE generation_jobs
+        SET draft_response_text = ?,
+            updated_at = ?
+        WHERE id = ?
+      `).run(responseText, now(), jobId)
+
+      return this.getGenerationJob(jobId)
+    },
+    saveGenerationJobParsedPayload({ jobId, parsedPayload }) {
+      db.prepare(`
+        UPDATE generation_jobs
+        SET parsed_payload_json = ?,
+            updated_at = ?
+        WHERE id = ?
+      `).run(serializeJson(parsedPayload), now(), jobId)
 
       return this.getGenerationJob(jobId)
     },
