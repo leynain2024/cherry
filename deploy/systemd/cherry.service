@@ -1,0 +1,15 @@
+[Unit]
+Description=Cherry Haibao service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/cherry/app
+EnvironmentFile=/srv/cherry/shared/cherry.env
+ExecStart=/usr/bin/npm run start
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
