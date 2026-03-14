@@ -4,8 +4,8 @@
 
 - `Nginx` 负责公网 `80/443` 和 HTTPS 证书
 - `Node.js` 只在服务器本机监听 `127.0.0.1:3135`
-- 持久化数据统一放在 `/srv/cherry/shared/data`
-- 应用代码放在 `/srv/cherry/app`
+- 持久化数据统一放在 `/opt/cherry-deploy/shared/data`
+- 应用代码放在 `/opt/cherry`
 
 这样浏览器拿到的是正式 HTTPS 证书，数据库、上传图片、录音和生成音频也能跟代码分开维护。
 
@@ -32,10 +32,12 @@ cp deploy/server.env.example deploy/server.env.local
 把 `deploy/server.env.local` 改成你的服务器信息，至少填：
 
 ```dotenv
-DEPLOY_HOST=你的服务器公网IP
+DEPLOY_HOST=124.156.120.109
 DEPLOY_USER=root
 DEPLOY_SSH_PORT=22
-REMOTE_BASE_DIR=/srv/cherry
+REMOTE_BASE_DIR=/opt/cherry-deploy
+REMOTE_APP_DIR=/opt/cherry
+REMOTE_DATA_DIR=/opt/cherry-deploy/shared/data
 APP_SERVICE=cherry
 SERVER_NAME=haibao.ballofleyna.cn
 ```
@@ -61,19 +63,20 @@ npm -v
 拉取代码到服务器：
 
 ```bash
-sudo mkdir -p /srv/cherry
-sudo chown -R "$USER":"$(id -gn)" /srv/cherry
-git clone https://github.com/leynain2024/cherry.git /srv/cherry/app
+sudo mkdir -p /opt/cherry /opt/cherry-deploy/shared/data
+sudo chown -R "$USER":"$(id -gn)" /opt/cherry /opt/cherry-deploy
+git clone https://github.com/leynain2024/cherry.git /opt/cherry
 ```
 
 创建服务环境文件：
 
 ```bash
-sudo mkdir -p /srv/cherry/shared/data
-sudo tee /srv/cherry/shared/cherry.env >/dev/null <<'EOF'
+sudo mkdir -p /opt/cherry-deploy/shared/data
+sudo tee /opt/cherry-deploy/shared/cherry.env >/dev/null <<'EOF'
 HOST=127.0.0.1
 PORT=3135
 SERVER_TLS=off
+DATA_DIR=/opt/cherry-deploy/shared/data
 EOF
 ```
 
@@ -116,7 +119,7 @@ npm run deploy:pull-data
 在服务器上执行：
 
 ```bash
-cd /srv/cherry/app
+cd /opt/cherry
 SERVER_NAME=haibao.ballofleyna.cn APP_UPSTREAM=127.0.0.1:3135 bash scripts/install-nginx-site.sh
 ```
 
@@ -190,6 +193,20 @@ sudo nginx -t
 
 ```bash
 sudo certbot renew --dry-run
+```
+
+服务器日常更新代码并重启服务：
+
+```bash
+cd /opt/cherry
+bash scripts/update-server.sh
+```
+
+如果你更习惯 `npm` 命令，也可以：
+
+```bash
+cd /opt/cherry
+npm run server:update
 ```
 
 ## 10. 当前同步范围说明

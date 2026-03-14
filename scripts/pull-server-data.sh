@@ -22,9 +22,10 @@ REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-/srv/cherry}"
 REMOTE_APP_DIR="${REMOTE_APP_DIR:-${REMOTE_BASE_DIR}/app}"
 REMOTE_SHARED_DIR="${REMOTE_SHARED_DIR:-${REMOTE_BASE_DIR}/shared}"
 REMOTE_DATA_DIR="${REMOTE_DATA_DIR:-${REMOTE_SHARED_DIR}/data}"
+REMOTE_ENV_FILE="${REMOTE_ENV_FILE:-${REMOTE_SHARED_DIR}/cherry.env}"
 
 SSH_TARGET="${DEPLOY_USER}@${DEPLOY_HOST}"
-SSH_CMD=(ssh -p "${DEPLOY_SSH_PORT}")
+SSH_CMD=(ssh -tt -p "${DEPLOY_SSH_PORT}")
 RSYNC_SSH="ssh -p ${DEPLOY_SSH_PORT}"
 REMOTE_SNAPSHOT_DIR="${REMOTE_BASE_DIR}/pull-snapshot"
 LOCAL_DATA_DIR="${PROJECT_ROOT}/data"
@@ -35,6 +36,11 @@ set -euo pipefail
 rm -rf '${REMOTE_SNAPSHOT_DIR}'
 mkdir -p '${REMOTE_SNAPSHOT_DIR}'
 cd '${REMOTE_APP_DIR}'
+if [[ -f '${REMOTE_ENV_FILE}' ]]; then
+  set -a
+  source '${REMOTE_ENV_FILE}'
+  set +a
+fi
 node scripts/create-data-snapshot.mjs '${REMOTE_SNAPSHOT_DIR}'
 EOF
 

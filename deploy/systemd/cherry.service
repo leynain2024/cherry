@@ -4,12 +4,12 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/srv/cherry/app
-EnvironmentFile=/srv/cherry/shared/cherry.env
+WorkingDirectory=__APP_DIR__
+EnvironmentFile=__ENV_FILE__
 ExecStart=/usr/bin/npm run start
 Restart=always
 RestartSec=5
-User=root
+User=__APP_RUN_USER__
 
 [Install]
 WantedBy=multi-user.target

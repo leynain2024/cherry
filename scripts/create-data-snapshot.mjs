@@ -4,10 +4,11 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import Database from 'better-sqlite3'
+import { resolveDataDir } from '../server/data-dir.js'
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const projectRoot = path.resolve(scriptDir, '..')
-const sourceDataDir = path.join(projectRoot, 'data')
+const sourceDataDir = resolveDataDir({ rootDir: projectRoot })
 const sourceDbPath = path.join(sourceDataDir, 'haibao.db')
 const destinationArg = process.argv[2]
 const destinationDir = destinationArg

@@ -3,6 +3,7 @@ import path from 'node:path'
 import { randomUUID, createHash } from 'node:crypto'
 import Database from 'better-sqlite3'
 import bcrypt from 'bcryptjs'
+import { resolveDataDir } from './data-dir.js'
 import { buildFrameworkUnits, defaultSubject } from './framework-content.js'
 import { normalizePricing } from './pricing.js'
 
@@ -504,7 +505,7 @@ const generationJobRowToObject = (row) => ({
 const isStructuredUnit = (unit) => Array.isArray(unit?.lessons) && unit.lessons.length > 0
 
 export const createDataStore = ({ rootDir = process.cwd() } = {}) => {
-  const dataDir = path.join(rootDir, 'data')
+  const dataDir = resolveDataDir({ rootDir })
   const uploadsDir = path.join(dataDir, 'uploads')
   const recordingsDir = path.join(dataDir, 'recordings')
   const audioAssetsDir = path.join(dataDir, 'audio-assets')

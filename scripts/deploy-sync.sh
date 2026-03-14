@@ -24,9 +24,11 @@ REMOTE_SHARED_DIR="${REMOTE_SHARED_DIR:-${REMOTE_BASE_DIR}/shared}"
 REMOTE_DATA_DIR="${REMOTE_DATA_DIR:-${REMOTE_SHARED_DIR}/data}"
 REMOTE_ENV_FILE="${REMOTE_ENV_FILE:-${REMOTE_SHARED_DIR}/cherry.env}"
 APP_SERVICE="${APP_SERVICE:-cherry}"
+APP_RUN_USER="${APP_RUN_USER:-root}"
+REMOTE_SERVICE_FILE="${REMOTE_SERVICE_FILE:-/etc/systemd/system/${APP_SERVICE}.service}"
 
 SSH_TARGET="${DEPLOY_USER}@${DEPLOY_HOST}"
-SSH_CMD=(ssh -p "${DEPLOY_SSH_PORT}")
+SSH_CMD=(ssh -tt -p "${DEPLOY_SSH_PORT}")
 RSYNC_SSH="ssh -p ${DEPLOY_SSH_PORT}"
 SNAPSHOT_ROOT="$(mktemp -d)"
 SNAPSHOT_DATA_DIR="${SNAPSHOT_ROOT}/data"
@@ -51,6 +53,7 @@ if [[ ! -f '${REMOTE_ENV_FILE}' ]]; then
 HOST=127.0.0.1
 PORT=3135
 SERVER_TLS=off
+DATA_DIR=${REMOTE_DATA_DIR}
 ENVFILE
 fi
 
@@ -88,7 +91,11 @@ set -euo pipefail
 cd '${REMOTE_APP_DIR}'
 npm ci
 npm run build
-sudo cp '${REMOTE_APP_DIR}/deploy/systemd/cherry.service' '/etc/systemd/system/${APP_SERVICE}.service'
+sed \
+  -e 's#__APP_DIR__#${REMOTE_APP_DIR}#g' \
+  -e 's#__ENV_FILE__#${REMOTE_ENV_FILE}#g' \
+  -e 's#__APP_RUN_USER__#${APP_RUN_USER}#g' \
+  '${REMOTE_APP_DIR}/deploy/systemd/cherry.service' | sudo tee '${REMOTE_SERVICE_FILE}' >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable '${APP_SERVICE}'
 sudo systemctl restart '${APP_SERVICE}'
