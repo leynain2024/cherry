@@ -2674,7 +2674,7 @@ function App() {
           />
           <div className="topbar-copy">
             <h1>海宝英语闯关岛</h1>
-            {userSession.authenticated ? <p className="subtitle">欢迎，{userSession.user?.username}</p> : null}
+            {userSession.authenticated ? <p className="subtitle">欢迎，{userSession.user?.displayName || userSession.user?.username}</p> : null}
           </div>
         </div>
         {userSession.authenticated ? (

@@ -415,7 +415,7 @@ describe('Haibao app', () => {
 
     await waitFor(() => {
       expect(screen.getByText('海宝英语闯关岛')).toBeInTheDocument()
-      expect(screen.getByText((content) => content.includes('欢迎，amy'))).toBeInTheDocument()
+      expect(screen.getByText((content) => content.includes('欢迎，Amy'))).toBeInTheDocument()
       expect(screen.getByText('海宝体验课')).toBeInTheDocument()
     })
   })
